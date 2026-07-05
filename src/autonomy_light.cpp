@@ -1,0 +1,1160 @@
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cerrno>
+#include <cmath>
+#include <csignal>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/point_cloud2_iterator.hpp>
+#include <std_msgs/msg/string.hpp>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Vector3.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <tf2_ros/static_transform_broadcaster.h>
+#include <tf2_ros/transform_broadcaster.h>
+
+namespace autonomy_light
+{
+namespace
+{
+
+struct GridSpec
+{
+  double resolution{0.05};
+  double x_length{6.0};
+  double y_length{6.0};
+  double x_center{0.0};
+  double y_center{0.0};
+  double min_z{-2.0};
+  double max_z{2.0};
+
+  [[nodiscard]] double xMin() const { return x_center - 0.5 * x_length; }
+  [[nodiscard]] double xMax() const { return x_center + 0.5 * x_length; }
+  [[nodiscard]] double yMin() const { return y_center - 0.5 * y_length; }
+  [[nodiscard]] double yMax() const { return y_center + 0.5 * y_length; }
+  [[nodiscard]] std::uint32_t width() const
+  {
+    return static_cast<std::uint32_t>(std::ceil(x_length / resolution));
+  }
+  [[nodiscard]] std::uint32_t height() const
+  {
+    return static_cast<std::uint32_t>(std::ceil(y_length / resolution));
+  }
+};
+
+struct ElevationGrid
+{
+  GridSpec spec;
+  std_msgs::msg::Header header;
+  std::vector<float> height;
+
+  explicit ElevationGrid(GridSpec grid_spec = {})
+  : spec(std::move(grid_spec))
+  {
+    if (spec.resolution <= 0.0 || spec.x_length <= 0.0 || spec.y_length <= 0.0) {
+      throw std::invalid_argument("Invalid elevation grid geometry");
+    }
+    reset();
+  }
+
+  void reset()
+  {
+    height.assign(
+      static_cast<std::size_t>(spec.width()) * spec.height(),
+      std::numeric_limits<float>::quiet_NaN());
+  }
+
+};
+
+struct MapPoint
+{
+  float x{0.0F};
+  float y{0.0F};
+  float z{0.0F};
+};
+
+struct CellHeight
+{
+  float height{std::numeric_limits<float>::quiet_NaN()};
+  int support_count{0};
+};
+
+std::string shortDouble(const double value)
+{
+  char buffer[32];
+  std::snprintf(buffer, sizeof(buffer), "%.3f", value);
+  return std::string(buffer);
+}
+
+class ChildProcesses
+{
+public:
+  ~ChildProcesses()
+  {
+    stopAll();
+  }
+
+  void start(
+    rclcpp::Logger logger,
+    const std::string & name,
+    const std::vector<std::string> & command)
+  {
+    if (command.empty()) {
+      RCLCPP_INFO(logger, "%s launch disabled: command is empty", name.c_str());
+      return;
+    }
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+      RCLCPP_ERROR(logger, "Failed to fork %s: %s", name.c_str(), std::strerror(errno));
+      return;
+    }
+
+    if (pid == 0) {
+      std::vector<char *> argv;
+      argv.reserve(command.size() + 1);
+      for (const auto & part : command) {
+        argv.push_back(const_cast<char *>(part.c_str()));
+      }
+      argv.push_back(nullptr);
+      execvp(argv.front(), argv.data());
+      std::fprintf(stderr, "Failed to exec %s: %s\n", command.front().c_str(), std::strerror(errno));
+      _exit(127);
+    }
+
+    children_.push_back({name, pid});
+    RCLCPP_INFO(logger, "Started %s pid=%d", name.c_str(), static_cast<int>(pid));
+  }
+
+  void stopAll()
+  {
+    for (const auto & child : children_) {
+      kill(child.pid, SIGINT);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+
+    for (const auto & child : children_) {
+      int status = 0;
+      const pid_t ret = waitpid(child.pid, &status, WNOHANG);
+      if (ret == 0) {
+        kill(child.pid, SIGTERM);
+        waitpid(child.pid, &status, 0);
+      }
+    }
+    children_.clear();
+  }
+
+private:
+  struct Child
+  {
+    std::string name;
+    pid_t pid{-1};
+  };
+
+  std::vector<Child> children_;
+};
+
+class AutonomyLightNode final : public rclcpp::Node
+{
+public:
+  AutonomyLightNode()
+  : Node("autonomy_light"),
+    static_tf_broadcaster_(this),
+    tf_broadcaster_(std::make_shared<tf2_ros::TransformBroadcaster>(this))
+  {
+    loadParameters();
+    configureTransform();
+    createIo();
+    publishStaticTransform();
+    startExternalProcesses();
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Autonomy light ready: lidar=%s target=%s grid=%ux%u res=%.3fm publish=%.1fHz",
+      lidar_frame_.c_str(),
+      target_frame_.c_str(),
+      grid_spec_.width(),
+      grid_spec_.height(),
+      grid_spec_.resolution,
+      publish_rate_hz_);
+  }
+
+  ~AutonomyLightNode() override
+  {
+    child_processes_.stopAll();
+  }
+
+private:
+  void loadParameters()
+  {
+    target_frame_ = declare_parameter<std::string>("target_frame", target_frame_);
+    height_map_frame_ = declare_parameter<std::string>("height_map_frame", height_map_frame_);
+    lidar_frame_ = declare_parameter<std::string>("lidar_frame", lidar_frame_);
+    odom_frame_ = declare_parameter<std::string>("odom_frame", odom_frame_);
+
+    target_to_lidar_xyz_ = declareVectorParameter(
+      "target_to_lidar_xyz", target_to_lidar_xyz_, 3);
+    target_to_lidar_rpy_ = declareVectorParameter(
+      "target_to_lidar_rpy", target_to_lidar_rpy_, 3);
+
+    grid_spec_.resolution = declare_parameter<double>("elevation_resolution", grid_spec_.resolution);
+    grid_spec_.x_length = declare_parameter<double>("elevation_x_length", grid_spec_.x_length);
+    grid_spec_.y_length = declare_parameter<double>("elevation_y_length", grid_spec_.y_length);
+    grid_spec_.x_center = declare_parameter<double>("elevation_x_center", grid_spec_.x_center);
+    grid_spec_.y_center = declare_parameter<double>("elevation_y_center", grid_spec_.y_center);
+    grid_spec_.min_z = declare_parameter<double>("elevation_min_z", grid_spec_.min_z);
+    grid_spec_.max_z = declare_parameter<double>("elevation_max_z", grid_spec_.max_z);
+    publish_rate_hz_ = std::max(1.0, declare_parameter<double>("publish_rate_hz", publish_rate_hz_));
+
+    raw_lidar_topic_ = declare_parameter<std::string>("raw_lidar_topic", raw_lidar_topic_);
+    raw_imu_topic_ = declare_parameter<std::string>("raw_imu_topic", raw_imu_topic_);
+    point_lio_odom_topic_ = declare_parameter<std::string>(
+      "point_lio_odom_topic", point_lio_odom_topic_);
+    point_lio_map_topic_ = declare_parameter<std::string>(
+      "point_lio_map_topic", point_lio_map_topic_);
+    odom_output_topic_ = declare_parameter<std::string>("odom_output_topic", odom_output_topic_);
+    height_map_topic_ = declare_parameter<std::string>("height_map_topic", height_map_topic_);
+    heartbeat_topic_ = declare_parameter<std::string>("heartbeat_topic", heartbeat_topic_);
+    interpolation_max_passes_ = std::max(
+      0,
+      static_cast<int>(declare_parameter<int>("interpolation_max_passes", interpolation_max_passes_)));
+    interpolation_min_neighbors_ = std::clamp(
+      static_cast<int>(declare_parameter<int>(
+        "interpolation_min_neighbors", interpolation_min_neighbors_)),
+      1,
+      8);
+    fill_remaining_height_ = declare_parameter<double>("fill_remaining_height", fill_remaining_height_);
+    robust_height_gate_ = declare_parameter<double>(
+      "algorithm.frame_aggregation.robust_height_gate", robust_height_gate_);
+    intra_cell_min_support_gap_ = declare_parameter<double>(
+      "algorithm.frame_aggregation.intra_cell_min_support_gap", intra_cell_min_support_gap_);
+    intra_cell_min_support_count_ = std::max(
+      1,
+      static_cast<int>(declare_parameter<int>(
+        "algorithm.frame_aggregation.intra_cell_min_support_count",
+        intra_cell_min_support_count_)));
+    edge_mix_height_diff_ = declare_parameter<double>(
+      "algorithm.frame_aggregation.edge_mix_height_diff", edge_mix_height_diff_);
+    edge_prefer_prev_support_count_ = std::max(
+      1,
+      static_cast<int>(declare_parameter<int>(
+        "algorithm.frame_aggregation.edge_prefer_prev_support_count",
+        edge_prefer_prev_support_count_)));
+    cell_height_percentile_ = std::clamp(
+      declare_parameter<double>("algorithm.frame_aggregation.cell_height_percentile", cell_height_percentile_),
+      0.0,
+      1.0);
+    temporal_alpha_ = std::clamp(
+      declare_parameter<double>("algorithm.frame_aggregation.temporal_alpha", temporal_alpha_),
+      0.0,
+      1.0);
+    isolated_filter_radius_ = std::max(
+      0, static_cast<int>(declare_parameter<int>(
+        "algorithm.isolated_filter.radius", isolated_filter_radius_)));
+    isolated_filter_min_support_neighbors_ = std::max(
+      0,
+      static_cast<int>(declare_parameter<int>(
+        "algorithm.isolated_filter.min_support_neighbors",
+        isolated_filter_min_support_neighbors_)));
+    isolated_filter_support_height_diff_ = declare_parameter<double>(
+      "algorithm.isolated_filter.support_height_diff", isolated_filter_support_height_diff_);
+    isolated_filter_outlier_height_diff_ = declare_parameter<double>(
+      "algorithm.isolated_filter.outlier_height_diff", isolated_filter_outlier_height_diff_);
+    isolated_filter_every_n_frames_ = std::max(
+      1,
+      static_cast<int>(declare_parameter<int>(
+        "algorithm.isolated_filter.every_n_frames",
+        isolated_filter_every_n_frames_)));
+    hole_fill_radius_ = std::max(
+      0, static_cast<int>(declare_parameter<int>("algorithm.hole_fill.radius", hole_fill_radius_)));
+    hole_fill_min_neighbors_ = std::max(
+      0, static_cast<int>(declare_parameter<int>(
+        "algorithm.hole_fill.min_neighbors", hole_fill_min_neighbors_)));
+    hole_fill_max_height_diff_ = declare_parameter<double>(
+      "algorithm.hole_fill.max_height_diff", hole_fill_max_height_diff_);
+    bilateral_radius_ = std::max(
+      0, static_cast<int>(declare_parameter<int>("algorithm.bilateral.radius", bilateral_radius_)));
+    bilateral_sigma_spatial_ = std::max(
+      1.0e-6,
+      declare_parameter<double>("algorithm.bilateral.sigma_spatial", bilateral_sigma_spatial_));
+    bilateral_sigma_height_ = std::max(
+      1.0e-6,
+      declare_parameter<double>("algorithm.bilateral.sigma_height", bilateral_sigma_height_));
+    bilateral_max_height_diff_ = declare_parameter<double>(
+      "algorithm.bilateral.max_height_diff", bilateral_max_height_diff_);
+    bilateral_passes_ = std::max(
+      0, static_cast<int>(declare_parameter<int>("algorithm.bilateral.passes", bilateral_passes_)));
+    bilateral_every_n_frames_ = std::max(
+      1, static_cast<int>(declare_parameter<int>(
+        "algorithm.bilateral.every_n_frames", bilateral_every_n_frames_)));
+
+    start_lidar_driver_ = declare_parameter<bool>("start_lidar_driver", start_lidar_driver_);
+    start_point_lio_ = declare_parameter<bool>("start_point_lio", start_point_lio_);
+    child_use_sim_time_ = declare_parameter<bool>("child_use_sim_time", child_use_sim_time_);
+    lidar_driver_command_ = declare_parameter<std::vector<std::string>>(
+      "lidar_driver_command", lidar_driver_command_);
+    point_lio_command_ = declare_parameter<std::vector<std::string>>(
+      "point_lio_command", point_lio_command_);
+    point_lio_config_file_ = declare_parameter<std::string>(
+      "point_lio_config_file", point_lio_config_file_);
+
+    latest_grid_ = ElevationGrid(grid_spec_);
+  }
+
+  std::vector<double> declareVectorParameter(
+    const std::string & name,
+    const std::vector<double> & defaults,
+    const std::size_t expected_size)
+  {
+    auto values = declare_parameter<std::vector<double>>(name, defaults);
+    if (values.size() != expected_size) {
+      throw std::invalid_argument(name + " must contain " + std::to_string(expected_size) + " values");
+    }
+    return values;
+  }
+
+  void configureTransform()
+  {
+    tf2::Quaternion q;
+    q.setRPY(target_to_lidar_rpy_[0], target_to_lidar_rpy_[1], target_to_lidar_rpy_[2]);
+    target_to_lidar_rotation_ = tf2::Matrix3x3(q);
+    target_to_lidar_translation_ = tf2::Vector3(
+      target_to_lidar_xyz_[0],
+      target_to_lidar_xyz_[1],
+      target_to_lidar_xyz_[2]);
+    target_to_lidar_quaternion_ = q;
+  }
+
+  void createIo()
+  {
+    height_map_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+      height_map_topic_,
+      rclcpp::QoS(rclcpp::KeepLast(2)).reliable().durability_volatile());
+    odom_pub_ = create_publisher<nav_msgs::msg::Odometry>(
+      odom_output_topic_,
+      rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile());
+    heartbeat_pub_ = create_publisher<std_msgs::msg::String>(heartbeat_topic_, 10);
+
+    lidar_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+      raw_lidar_topic_,
+      rclcpp::SensorDataQoS(),
+      [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+        onLidarCloud(std::move(msg));
+      });
+    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+      point_lio_odom_topic_,
+      rclcpp::QoS(rclcpp::KeepLast(20)).reliable().durability_volatile(),
+      [this](nav_msgs::msg::Odometry::SharedPtr msg) {
+        onPointLioOdom(std::move(msg));
+      });
+    map_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+      point_lio_map_topic_,
+      rclcpp::SensorDataQoS(),
+      [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+        onPointLioMap(std::move(msg));
+      });
+
+    const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::duration<double>(1.0 / publish_rate_hz_));
+    publish_timer_ = create_wall_timer(period, [this]() { publishLatest(); });
+    heartbeat_timer_ = create_wall_timer(
+      std::chrono::milliseconds(500),
+      [this]() { publishHeartbeat(); });
+  }
+
+  void publishStaticTransform()
+  {
+    geometry_msgs::msg::TransformStamped msg;
+    msg.header.stamp = now();
+    msg.header.frame_id = target_frame_;
+    msg.child_frame_id = lidar_frame_;
+    msg.transform.translation.x = target_to_lidar_translation_.x();
+    msg.transform.translation.y = target_to_lidar_translation_.y();
+    msg.transform.translation.z = target_to_lidar_translation_.z();
+    msg.transform.rotation = tf2::toMsg(target_to_lidar_quaternion_);
+    static_tf_broadcaster_.sendTransform(msg);
+  }
+
+  tf2::Quaternion yawOnlyQuaternion(const geometry_msgs::msg::Quaternion & orientation) const
+  {
+    tf2::Quaternion q;
+    tf2::fromMsg(orientation, q);
+    q.normalize();
+
+    double roll = 0.0;
+    double pitch = 0.0;
+    double yaw = 0.0;
+    tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+
+    tf2::Quaternion q_yaw;
+    q_yaw.setRPY(0.0, 0.0, yaw);
+    q_yaw.normalize();
+    return q_yaw;
+  }
+
+  void publishHeightMapFrameTransform(const nav_msgs::msg::Odometry & odom)
+  {
+    if (height_map_frame_.empty() || height_map_frame_ == odom_frame_) {
+      return;
+    }
+
+    geometry_msgs::msg::TransformStamped msg;
+    msg.header.stamp = now();
+    msg.header.frame_id = odom_frame_;
+    msg.child_frame_id = height_map_frame_;
+    msg.transform.translation.x = odom.pose.pose.position.x;
+    msg.transform.translation.y = odom.pose.pose.position.y;
+    msg.transform.translation.z = odom.pose.pose.position.z;
+    msg.transform.rotation = tf2::toMsg(yawOnlyQuaternion(odom.pose.pose.orientation));
+    tf_broadcaster_->sendTransform(msg);
+  }
+
+  void startExternalProcesses()
+  {
+    if (start_lidar_driver_) {
+      auto command = lidar_driver_command_;
+      if (command.empty()) {
+        command = {"ros2", "launch", "livox_ros_driver2", "msg_MID360_launch.py"};
+      }
+      child_processes_.start(get_logger(), "MID360 driver", command);
+    }
+
+    if (start_point_lio_) {
+      auto command = point_lio_command_;
+      if (command.empty()) {
+        command = defaultPointLioCommand();
+      }
+      child_processes_.start(get_logger(), "Point-LIO", command);
+    }
+  }
+
+  std::vector<std::string> defaultPointLioCommand() const
+  {
+    std::string config_file = point_lio_config_file_;
+    if (config_file.empty()) {
+      config_file = ament_index_cpp::get_package_share_directory("autonomy_light") +
+        "/config/point_lio_mid360.yaml";
+    }
+
+    auto command = std::vector<std::string>{
+      "ros2", "run", "autonomy_light", "autonomy_light_pointlio_mapping",
+      "--ros-args",
+      "--params-file", config_file,
+      "-p", "common.lid_topic:=" + raw_lidar_topic_,
+      "-p", "common.imu_topic:=" + raw_imu_topic_,
+      "-p", "odom_header_frame_id:=" + odom_frame_,
+      "-p", "odom_child_frame_id:=" + target_frame_,
+      "-p", "preprocess.lidar_type:=1",
+      "-p", "preprocess.timestamp_unit:=3",
+      "-p", "preprocess.scan_line:=4",
+      "-p", "preprocess.blind:=0.5",
+      "-p", "point_filter_num:=3",
+      "-p", "publish.scan_bodyframe_pub_en:=false",
+      "-p", "publish.local_map_en:=true",
+      "-p", "publish.local_map_topic:=" + point_lio_map_topic_,
+      "-p", "publish.local_map_x_length:=" + shortDouble(pointLioLocalMapXLength()),
+      "-p", "publish.local_map_y_length:=" + shortDouble(pointLioLocalMapYLength()),
+      "-p", "publish.local_map_z_length:=" + shortDouble(pointLioLocalMapZLength()),
+      "-p", "publish.local_map_every_n_frames:=1",
+    };
+    if (child_use_sim_time_) {
+      command.push_back("-p");
+      command.push_back("use_sim_time:=true");
+    }
+    return command;
+  }
+
+  double pointLioLocalMapXLength() const
+  {
+    return std::max(1.0, grid_spec_.x_length + 2.0 * std::abs(target_to_lidar_translation_.x()) + 1.0);
+  }
+
+  double pointLioLocalMapYLength() const
+  {
+    return std::max(1.0, grid_spec_.y_length + 2.0 * std::abs(target_to_lidar_translation_.y()) + 1.0);
+  }
+
+  double pointLioLocalMapZLength() const
+  {
+    return std::max(
+      1.0,
+      (grid_spec_.max_z - grid_spec_.min_z) + 2.0 * std::abs(target_to_lidar_translation_.z()) + 1.0);
+  }
+
+  void onLidarCloud(sensor_msgs::msg::PointCloud2::SharedPtr msg)
+  {
+    (void)msg;
+    last_lidar_time_ = now();
+    ++lidar_count_;
+  }
+
+  void onPointLioMap(sensor_msgs::msg::PointCloud2::SharedPtr msg)
+  {
+    auto points = std::make_shared<std::vector<MapPoint>>();
+    points->reserve(static_cast<std::size_t>(msg->width) * msg->height);
+    try {
+      sensor_msgs::PointCloud2ConstIterator<float> x_it(*msg, "x");
+      sensor_msgs::PointCloud2ConstIterator<float> y_it(*msg, "y");
+      sensor_msgs::PointCloud2ConstIterator<float> z_it(*msg, "z");
+
+      for (; x_it != x_it.end(); ++x_it, ++y_it, ++z_it) {
+        if (!std::isfinite(*x_it) || !std::isfinite(*y_it) || !std::isfinite(*z_it)) {
+          continue;
+        }
+        points->push_back({*x_it, *y_it, *z_it});
+      }
+    } catch (const std::runtime_error & ex) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(),
+        *get_clock(),
+        2000,
+        "Point-LIO map cloud cannot be sampled: %s",
+        ex.what());
+      return;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(map_mutex_);
+      latest_map_points_ = std::move(points);
+      latest_map_frame_ = msg->header.frame_id;
+      has_map_ = true;
+    }
+    last_map_time_ = now();
+    ++map_count_;
+  }
+
+  bool buildElevationGridFromMap(ElevationGrid & grid)
+  {
+    std::shared_ptr<const std::vector<MapPoint>> map_points;
+    nav_msgs::msg::Odometry odom;
+    {
+      std::lock_guard<std::mutex> lock(map_mutex_);
+      if (!has_map_ || !latest_map_points_) {
+        return false;
+      }
+      map_points = latest_map_points_;
+    }
+    {
+      std::lock_guard<std::mutex> lock(odom_mutex_);
+      if (!has_odom_) {
+        return false;
+      }
+      odom = latest_odom_;
+    }
+
+    grid = ElevationGrid(grid_spec_);
+    grid.header.stamp = now();
+    grid.header.frame_id = height_map_frame_;
+
+    const tf2::Quaternion q_map_height = yawOnlyQuaternion(odom.pose.pose.orientation);
+    const tf2::Quaternion q_height_map = q_map_height.inverse();
+    const tf2::Vector3 p_map_target(
+      odom.pose.pose.position.x,
+      odom.pose.pose.position.y,
+      odom.pose.pose.position.z);
+
+    const auto width = grid.spec.width();
+    const auto height = grid.spec.height();
+    const double x_min = grid.spec.xMin();
+    const double x_max = grid.spec.xMax();
+    const double y_min = grid.spec.yMin();
+    const double y_max = grid.spec.yMax();
+
+    std::vector<std::vector<float>> cell_samples(static_cast<std::size_t>(width) * height);
+    std::vector<int> support_counts(static_cast<std::size_t>(width) * height, 0);
+
+    for (const auto & point : *map_points) {
+      const tf2::Vector3 p_height = tf2::quatRotate(
+        q_height_map,
+        tf2::Vector3(point.x, point.y, point.z) - p_map_target);
+      const double x = p_height.x();
+      const double y = p_height.y();
+      const double z = p_height.z();
+
+      if (x < x_min || x >= x_max || y < y_min || y >= y_max) {
+        continue;
+      }
+      if (z < grid.spec.min_z || z > grid.spec.max_z) {
+        continue;
+      }
+
+      const auto col = static_cast<std::uint32_t>((x - x_min) / grid.spec.resolution);
+      const auto row = static_cast<std::uint32_t>((y - y_min) / grid.spec.resolution);
+      if (col >= width || row >= height) {
+        continue;
+      }
+
+      const auto index = static_cast<std::size_t>(row) * width + col;
+      cell_samples[index].push_back(static_cast<float>(z));
+    }
+
+    for (std::size_t index = 0; index < cell_samples.size(); ++index) {
+      if (cell_samples[index].empty()) {
+        continue;
+      }
+      const auto cell = robustCellHeight(cell_samples[index]);
+      grid.height[index] = cell.height;
+      support_counts[index] = cell.support_count;
+    }
+
+    mergeWithPreviousGrid(grid, support_counts);
+    ++filter_frame_count_;
+    applyIsolatedFilter(grid);
+    fillHoles(grid);
+    applyBilateralFilter(grid);
+    interpolateMissingCells(grid);
+    return true;
+  }
+
+  CellHeight robustCellHeight(std::vector<float> & samples) const
+  {
+    std::sort(samples.begin(), samples.end());
+    const float low = samples.front();
+    const float support_limit = low + static_cast<float>(intra_cell_min_support_gap_);
+    const auto support_end = std::upper_bound(samples.begin(), samples.end(), support_limit);
+    const int support_count = static_cast<int>(std::distance(samples.begin(), support_end));
+
+    if (support_count >= intra_cell_min_support_count_) {
+      float sum = 0.0F;
+      for (auto it = samples.begin(); it != support_end; ++it) {
+        sum += *it;
+      }
+      return {sum / static_cast<float>(support_count), support_count};
+    }
+
+    const auto percentile_index = static_cast<std::size_t>(
+      std::round(cell_height_percentile_ * static_cast<double>(samples.size() - 1)));
+    const auto clamped_index = std::min(percentile_index, samples.size() - 1);
+    return {samples[clamped_index], support_count};
+  }
+
+  void mergeWithPreviousGrid(ElevationGrid & grid, const std::vector<int> & support_counts)
+  {
+    std::lock_guard<std::mutex> lock(grid_mutex_);
+    if (!has_grid_ || latest_grid_.height.size() != grid.height.size()) {
+      return;
+    }
+
+    for (std::size_t i = 0; i < grid.height.size(); ++i) {
+      const float previous = latest_grid_.height[i];
+      if (!std::isfinite(previous)) {
+        continue;
+      }
+
+      float & current = grid.height[i];
+      if (!std::isfinite(current)) {
+        current = previous;
+        continue;
+      }
+
+      const float diff = std::abs(current - previous);
+      if (diff <= edge_mix_height_diff_ || diff <= robust_height_gate_) {
+        current = static_cast<float>(
+          temporal_alpha_ * current + (1.0 - temporal_alpha_) * previous);
+      } else if (
+        i < support_counts.size() &&
+        support_counts[i] < edge_prefer_prev_support_count_)
+      {
+        current = previous;
+      }
+    }
+  }
+
+  void applyIsolatedFilter(ElevationGrid & grid) const
+  {
+    if (
+      isolated_filter_radius_ <= 0 ||
+      isolated_filter_min_support_neighbors_ <= 0 ||
+      (filter_frame_count_ % isolated_filter_every_n_frames_) != 0)
+    {
+      return;
+    }
+
+    const int width = static_cast<int>(grid.spec.width());
+    const int height = static_cast<int>(grid.spec.height());
+    auto next = grid.height;
+
+    for (int row = 0; row < height; ++row) {
+      for (int col = 0; col < width; ++col) {
+        const auto index = static_cast<std::size_t>(row) * width + col;
+        const float value = grid.height[index];
+        if (!std::isfinite(value)) {
+          continue;
+        }
+
+        std::vector<float> neighbors;
+        int support = 0;
+        collectNeighbors(grid, row, col, isolated_filter_radius_, neighbors);
+        for (const auto neighbor : neighbors) {
+          if (std::abs(neighbor - value) <= isolated_filter_support_height_diff_) {
+            ++support;
+          }
+        }
+
+        if (support >= isolated_filter_min_support_neighbors_ || neighbors.empty()) {
+          continue;
+        }
+
+        const float median = medianValue(neighbors);
+        if (std::isfinite(median) && std::abs(value - median) >= isolated_filter_outlier_height_diff_) {
+          next[index] = median;
+        }
+      }
+    }
+
+    grid.height.swap(next);
+  }
+
+  void fillHoles(ElevationGrid & grid) const
+  {
+    if (hole_fill_radius_ <= 0 || hole_fill_min_neighbors_ <= 0) {
+      return;
+    }
+
+    const int width = static_cast<int>(grid.spec.width());
+    const int height = static_cast<int>(grid.spec.height());
+    auto next = grid.height;
+
+    for (int row = 0; row < height; ++row) {
+      for (int col = 0; col < width; ++col) {
+        const auto index = static_cast<std::size_t>(row) * width + col;
+        if (std::isfinite(grid.height[index])) {
+          continue;
+        }
+
+        std::vector<float> neighbors;
+        collectNeighbors(grid, row, col, hole_fill_radius_, neighbors);
+        if (static_cast<int>(neighbors.size()) < hole_fill_min_neighbors_) {
+          continue;
+        }
+
+        const auto minmax = std::minmax_element(neighbors.begin(), neighbors.end());
+        if ((*minmax.second - *minmax.first) > hole_fill_max_height_diff_) {
+          continue;
+        }
+
+        float sum = 0.0F;
+        for (const auto value : neighbors) {
+          sum += value;
+        }
+        next[index] = sum / static_cast<float>(neighbors.size());
+      }
+    }
+
+    grid.height.swap(next);
+  }
+
+  void applyBilateralFilter(ElevationGrid & grid) const
+  {
+    if (
+      bilateral_radius_ <= 0 ||
+      bilateral_passes_ <= 0 ||
+      (filter_frame_count_ % bilateral_every_n_frames_) != 0)
+    {
+      return;
+    }
+
+    const int width = static_cast<int>(grid.spec.width());
+    const int height = static_cast<int>(grid.spec.height());
+    const double spatial_denom = 2.0 * bilateral_sigma_spatial_ * bilateral_sigma_spatial_;
+    const double height_denom = 2.0 * bilateral_sigma_height_ * bilateral_sigma_height_;
+
+    for (int pass = 0; pass < bilateral_passes_; ++pass) {
+      auto next = grid.height;
+      for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+          const auto index = static_cast<std::size_t>(row) * width + col;
+          const float center = grid.height[index];
+          if (!std::isfinite(center)) {
+            continue;
+          }
+
+          double weighted_sum = center;
+          double weight_sum = 1.0;
+          for (int dy = -bilateral_radius_; dy <= bilateral_radius_; ++dy) {
+            const int nr = row + dy;
+            if (nr < 0 || nr >= height) {
+              continue;
+            }
+            for (int dx = -bilateral_radius_; dx <= bilateral_radius_; ++dx) {
+              if (dx == 0 && dy == 0) {
+                continue;
+              }
+              const int nc = col + dx;
+              if (nc < 0 || nc >= width) {
+                continue;
+              }
+              const auto neighbor_index = static_cast<std::size_t>(nr) * width + nc;
+              const float neighbor = grid.height[neighbor_index];
+              if (!std::isfinite(neighbor)) {
+                continue;
+              }
+
+              const double height_diff = static_cast<double>(neighbor - center);
+              if (std::abs(height_diff) > bilateral_max_height_diff_) {
+                continue;
+              }
+              const double spatial_dist2 = static_cast<double>(dx * dx + dy * dy);
+              const double weight = std::exp(
+                -(spatial_dist2 / spatial_denom) - ((height_diff * height_diff) / height_denom));
+              weighted_sum += weight * neighbor;
+              weight_sum += weight;
+            }
+          }
+
+          next[index] = static_cast<float>(weighted_sum / weight_sum);
+        }
+      }
+      grid.height.swap(next);
+    }
+  }
+
+  void collectNeighbors(
+    const ElevationGrid & grid,
+    const int row,
+    const int col,
+    const int radius,
+    std::vector<float> & neighbors) const
+  {
+    const int width = static_cast<int>(grid.spec.width());
+    const int height = static_cast<int>(grid.spec.height());
+    neighbors.clear();
+    neighbors.reserve(static_cast<std::size_t>((2 * radius + 1) * (2 * radius + 1) - 1));
+
+    for (int dy = -radius; dy <= radius; ++dy) {
+      const int nr = row + dy;
+      if (nr < 0 || nr >= height) {
+        continue;
+      }
+      for (int dx = -radius; dx <= radius; ++dx) {
+        if (dx == 0 && dy == 0) {
+          continue;
+        }
+        const int nc = col + dx;
+        if (nc < 0 || nc >= width) {
+          continue;
+        }
+        const auto index = static_cast<std::size_t>(nr) * width + nc;
+        const float value = grid.height[index];
+        if (std::isfinite(value)) {
+          neighbors.push_back(value);
+        }
+      }
+    }
+  }
+
+  static float medianValue(std::vector<float> values)
+  {
+    if (values.empty()) {
+      return std::numeric_limits<float>::quiet_NaN();
+    }
+    const auto middle = values.begin() + static_cast<std::ptrdiff_t>(values.size() / 2);
+    std::nth_element(values.begin(), middle, values.end());
+    return *middle;
+  }
+
+  void fillFromPreviousGrid(ElevationGrid & grid)
+  {
+    std::lock_guard<std::mutex> lock(grid_mutex_);
+    if (!has_grid_ || latest_grid_.height.size() != grid.height.size()) {
+      return;
+    }
+
+    for (std::size_t i = 0; i < grid.height.size(); ++i) {
+      if (!std::isfinite(grid.height[i]) && std::isfinite(latest_grid_.height[i])) {
+        grid.height[i] = latest_grid_.height[i];
+      }
+    }
+  }
+
+  void interpolateMissingCells(ElevationGrid & grid) const
+  {
+    const auto width = static_cast<int>(grid.spec.width());
+    const auto height = static_cast<int>(grid.spec.height());
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+
+    for (int pass = 0; pass < interpolation_max_passes_; ++pass) {
+      bool changed = false;
+      auto next = grid.height;
+      for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+          const auto index = static_cast<std::size_t>(row) * width + col;
+          if (std::isfinite(grid.height[index])) {
+            continue;
+          }
+
+          float sum = 0.0F;
+          int count = 0;
+          for (int dy = -1; dy <= 1; ++dy) {
+            const int nr = row + dy;
+            if (nr < 0 || nr >= height) {
+              continue;
+            }
+            for (int dx = -1; dx <= 1; ++dx) {
+              if (dx == 0 && dy == 0) {
+                continue;
+              }
+              const int nc = col + dx;
+              if (nc < 0 || nc >= width) {
+                continue;
+              }
+              const auto neighbor_index = static_cast<std::size_t>(nr) * width + nc;
+              const float value = grid.height[neighbor_index];
+              if (std::isfinite(value)) {
+                sum += value;
+                ++count;
+              }
+            }
+          }
+
+          if (count >= interpolation_min_neighbors_) {
+            next[index] = sum / static_cast<float>(count);
+            changed = true;
+          }
+        }
+      }
+
+      grid.height.swap(next);
+      if (!changed) {
+        break;
+      }
+    }
+
+    if (std::isfinite(fill_remaining_height_)) {
+      for (auto & height_value : grid.height) {
+        if (!std::isfinite(height_value)) {
+          height_value = static_cast<float>(fill_remaining_height_);
+        }
+      }
+    }
+  }
+
+  void onPointLioOdom(nav_msgs::msg::Odometry::SharedPtr msg)
+  {
+    {
+      std::lock_guard<std::mutex> lock(odom_mutex_);
+      latest_odom_ = *msg;
+      latest_odom_.child_frame_id = target_frame_;
+      has_odom_ = true;
+    }
+    last_odom_time_ = now();
+    ++odom_count_;
+  }
+
+  void publishLatest()
+  {
+    ElevationGrid grid;
+    if (buildElevationGridFromMap(grid)) {
+      {
+        std::lock_guard<std::mutex> lock(grid_mutex_);
+        latest_grid_ = grid;
+        has_grid_ = true;
+      }
+      height_map_pub_->publish(gridToPointCloud(grid));
+    }
+
+    nav_msgs::msg::Odometry odom;
+    bool publish_odom = false;
+    {
+      std::lock_guard<std::mutex> lock(odom_mutex_);
+      if (has_odom_) {
+        odom = latest_odom_;
+        publish_odom = true;
+      }
+    }
+    if (publish_odom) {
+      odom_pub_->publish(odom);
+      publishHeightMapFrameTransform(odom);
+    }
+  }
+
+  sensor_msgs::msg::PointCloud2 gridToPointCloud(const ElevationGrid & grid) const
+  {
+    std::size_t valid_count = 0;
+    for (const auto z : grid.height) {
+      if (std::isfinite(z)) {
+        ++valid_count;
+      }
+    }
+
+    sensor_msgs::msg::PointCloud2 cloud;
+    cloud.header = grid.header;
+    cloud.height = 1;
+    cloud.is_bigendian = false;
+    cloud.is_dense = true;
+
+    sensor_msgs::PointCloud2Modifier modifier(cloud);
+    modifier.setPointCloud2FieldsByString(1, "xyz");
+    modifier.resize(valid_count);
+
+    sensor_msgs::PointCloud2Iterator<float> x_it(cloud, "x");
+    sensor_msgs::PointCloud2Iterator<float> y_it(cloud, "y");
+    sensor_msgs::PointCloud2Iterator<float> z_it(cloud, "z");
+
+    const auto width = grid.spec.width();
+    for (std::uint32_t row = 0; row < grid.spec.height(); ++row) {
+      for (std::uint32_t col = 0; col < width; ++col) {
+        const auto index = static_cast<std::size_t>(row) * width + col;
+        const auto z = grid.height[index];
+        if (!std::isfinite(z)) {
+          continue;
+        }
+
+        *x_it = static_cast<float>(grid.spec.xMin() + (col + 0.5) * grid.spec.resolution);
+        *y_it = static_cast<float>(grid.spec.yMin() + (row + 0.5) * grid.spec.resolution);
+        *z_it = z;
+        ++x_it;
+        ++y_it;
+        ++z_it;
+      }
+    }
+
+    return cloud;
+  }
+
+  void publishHeartbeat()
+  {
+    std_msgs::msg::String msg;
+    const bool lidar_stale = lidar_count_ == 0 ||
+      (now() - last_lidar_time_) > rclcpp::Duration::from_seconds(2.0);
+    const bool odom_stale = odom_count_ == 0 ||
+      (now() - last_odom_time_) > rclcpp::Duration::from_seconds(2.0);
+    const bool map_stale = map_count_ == 0 ||
+      (now() - last_map_time_) > rclcpp::Duration::from_seconds(2.0);
+
+    if (lidar_stale) {
+      msg.data = "waiting_for_lidar";
+    } else if (odom_stale) {
+      msg.data = "degraded:waiting_for_point_lio_odom";
+    } else if (map_stale) {
+      msg.data = "degraded:waiting_for_point_lio_map";
+    } else {
+      msg.data = "ready:lidar=" + std::to_string(lidar_count_) +
+        ":odom=" + std::to_string(odom_count_) +
+        ":map=" + std::to_string(map_count_) +
+        ":publish_hz=" + shortDouble(publish_rate_hz_);
+    }
+    heartbeat_pub_->publish(msg);
+  }
+
+  std::string target_frame_{"base_link"};
+  std::string height_map_frame_{"base_link_gravity"};
+  std::string lidar_frame_{"mid360"};
+  std::string odom_frame_{"odom"};
+  std::vector<double> target_to_lidar_xyz_{0.0, 0.0, 0.3};
+  std::vector<double> target_to_lidar_rpy_{0.0, 0.0, 0.0};
+  tf2::Vector3 target_to_lidar_translation_{0.0, 0.0, 0.3};
+  tf2::Matrix3x3 target_to_lidar_rotation_{tf2::Quaternion::getIdentity()};
+  tf2::Quaternion target_to_lidar_quaternion_{tf2::Quaternion::getIdentity()};
+
+  GridSpec grid_spec_;
+  double publish_rate_hz_{50.0};
+  std::string raw_lidar_topic_{"/livox/lidar"};
+  std::string raw_imu_topic_{"/livox/imu"};
+  std::string point_lio_odom_topic_{"/aft_mapped_to_init"};
+  std::string point_lio_map_topic_{"/point_lio/local_map"};
+  std::string odom_output_topic_{"/autonomy_light/odom"};
+  std::string height_map_topic_{"/autonomy_light/height_map"};
+  std::string heartbeat_topic_{"/autonomy_light/heartbeat"};
+  int interpolation_max_passes_{8};
+  int interpolation_min_neighbors_{1};
+  double fill_remaining_height_{0.0};
+  double robust_height_gate_{0.04};
+  double intra_cell_min_support_gap_{0.025};
+  int intra_cell_min_support_count_{3};
+  double edge_mix_height_diff_{0.035};
+  int edge_prefer_prev_support_count_{2};
+  double cell_height_percentile_{0.20};
+  double temporal_alpha_{0.65};
+  int isolated_filter_radius_{1};
+  int isolated_filter_min_support_neighbors_{2};
+  double isolated_filter_support_height_diff_{0.025};
+  double isolated_filter_outlier_height_diff_{0.05};
+  int isolated_filter_every_n_frames_{2};
+  int hole_fill_radius_{1};
+  int hole_fill_min_neighbors_{3};
+  double hole_fill_max_height_diff_{0.03};
+  int bilateral_radius_{1};
+  double bilateral_sigma_spatial_{1.1};
+  double bilateral_sigma_height_{0.025};
+  double bilateral_max_height_diff_{0.04};
+  int bilateral_passes_{2};
+  int bilateral_every_n_frames_{2};
+  std::uint64_t filter_frame_count_{0};
+
+  bool start_lidar_driver_{true};
+  bool start_point_lio_{true};
+  bool child_use_sim_time_{false};
+  std::vector<std::string> lidar_driver_command_;
+  std::vector<std::string> point_lio_command_;
+  std::string point_lio_config_file_;
+
+  std::mutex map_mutex_;
+  std::shared_ptr<const std::vector<MapPoint>> latest_map_points_;
+  std::string latest_map_frame_;
+  bool has_map_{false};
+  std::mutex grid_mutex_;
+  ElevationGrid latest_grid_;
+  bool has_grid_{false};
+  std::mutex odom_mutex_;
+  nav_msgs::msg::Odometry latest_odom_;
+  bool has_odom_{false};
+  std::uint64_t lidar_count_{0};
+  std::uint64_t odom_count_{0};
+  std::uint64_t map_count_{0};
+  rclcpp::Time last_lidar_time_{0, 0u, RCL_SYSTEM_TIME};
+  rclcpp::Time last_odom_time_{0, 0u, RCL_SYSTEM_TIME};
+  rclcpp::Time last_map_time_{0, 0u, RCL_SYSTEM_TIME};
+
+  ChildProcesses child_processes_;
+  tf2_ros::StaticTransformBroadcaster static_tf_broadcaster_;
+  std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_sub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr height_map_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr heartbeat_pub_;
+  rclcpp::TimerBase::SharedPtr publish_timer_;
+  rclcpp::TimerBase::SharedPtr heartbeat_timer_;
+};
+
+}  // namespace
+}  // namespace autonomy_light
+
+int main(int argc, char ** argv)
+{
+  rclcpp::init(argc, argv);
+  try {
+    rclcpp::spin(std::make_shared<autonomy_light::AutonomyLightNode>());
+  } catch (const std::exception & ex) {
+    std::fprintf(stderr, "autonomy_light failed: %s\n", ex.what());
+    rclcpp::shutdown();
+    return 1;
+  }
+  rclcpp::shutdown();
+  return 0;
+}
