@@ -513,7 +513,7 @@ private:
       "-p", "preprocess.timestamp_unit:=3",
       "-p", "preprocess.scan_line:=4",
       "-p", "preprocess.blind:=0.5",
-      "-p", "point_filter_num:=3",
+      "-p", "point_filter_num:=1",
       "-p", "publish.scan_bodyframe_pub_en:=false",
       "-p", "publish.local_map_en:=true",
       "-p", "publish.local_map_topic:=" + point_lio_map_topic_,

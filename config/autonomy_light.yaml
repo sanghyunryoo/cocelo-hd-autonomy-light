@@ -8,7 +8,7 @@ autonomy_light:
     target_to_lidar_rpy: [0.0, 0.0, 0.0]
 
     # User-facing setup: robot-centric elevation map geometry.
-    elevation_resolution: 0.1
+    elevation_resolution: 0.05
     elevation_x_length: 1.2
     elevation_y_length: 1.2
     publish_rate_hz: 50.0
