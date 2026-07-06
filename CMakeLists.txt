@@ -97,11 +97,17 @@ install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
 )
 
-install(PROGRAMS launch.sh
+install(PROGRAMS
+  build.sh
+  launch.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 
 install(PROGRAMS scripts/find_mid360_ip.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(PROGRAMS scripts/setup_livox_driver.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 
