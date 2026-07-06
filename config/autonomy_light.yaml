@@ -11,6 +11,16 @@ autonomy_light:
     elevation_resolution: 0.05
     elevation_x_length: 1.2
     elevation_y_length: 1.2
+    height_origin:
+      # local_floor keeps the height map from riding on small odom z jitter caused by roll/pitch.
+      # Use odom for the old behavior, or fixed for a map-level z origin.
+      mode: "local_floor"
+      fixed_z: 0.0
+      filter_alpha: 0.25
+      max_step: 0.03
+      floor_radius: 0.6
+      floor_percentile: 0.20
+      floor_min_points: 20
     publish_rate_hz: 50.0
 
     # ROS 2 domain split: keep heavy perception internal, publish only control-facing

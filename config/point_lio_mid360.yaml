@@ -20,17 +20,17 @@
       imu_en: true
       start_in_aggressive_motion: false
       extrinsic_est_en: false
-      imu_time_inte: 0.02
-      satu_acc: 30.0
+      imu_time_inte: 0.005
+      satu_acc: 3.0
       satu_gyro: 35.0
       acc_norm: 1.0
-      lidar_meas_cov: 0.05
+      lidar_meas_cov: 0.01
       acc_cov_output: 500.0
       gyr_cov_output: 1000.0
       b_acc_cov: 0.0001
       b_gyr_cov: 0.0001
-      imu_meas_acc_cov: 0.1
-      imu_meas_omg_cov: 0.1
+      imu_meas_acc_cov: 0.01
+      imu_meas_omg_cov: 0.01
       gyr_cov_input: 0.01
       acc_cov_input: 0.1
       plane_thr: 0.1
@@ -63,7 +63,7 @@
       pcd_save_en: false
       interval: -1
 
-    use_imu_as_input: false
+    use_imu_as_input: true
     prop_at_freq_of_imu: true
     check_satu: true
     init_map_size: 10

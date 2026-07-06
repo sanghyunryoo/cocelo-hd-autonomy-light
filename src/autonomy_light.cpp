@@ -261,6 +261,27 @@ private:
     grid_spec_.y_center = declare_parameter<double>("elevation_y_center", grid_spec_.y_center);
     grid_spec_.min_z = declare_parameter<double>("elevation_min_z", grid_spec_.min_z);
     grid_spec_.max_z = declare_parameter<double>("elevation_max_z", grid_spec_.max_z);
+    height_origin_mode_ = declare_parameter<std::string>("height_origin.mode", height_origin_mode_);
+    height_origin_fixed_z_ = declare_parameter<double>("height_origin.fixed_z", height_origin_fixed_z_);
+    height_origin_filter_alpha_ = std::clamp(
+      declare_parameter<double>("height_origin.filter_alpha", height_origin_filter_alpha_),
+      0.0,
+      1.0);
+    height_origin_max_step_ = std::max(
+      0.0,
+      declare_parameter<double>("height_origin.max_step", height_origin_max_step_));
+    height_origin_floor_radius_ = std::max(
+      grid_spec_.resolution,
+      declare_parameter<double>("height_origin.floor_radius", height_origin_floor_radius_));
+    height_origin_floor_percentile_ = std::clamp(
+      declare_parameter<double>("height_origin.floor_percentile", height_origin_floor_percentile_),
+      0.0,
+      1.0);
+    height_origin_floor_min_points_ = std::max(
+      1,
+      static_cast<int>(declare_parameter<int>(
+        "height_origin.floor_min_points",
+        height_origin_floor_min_points_)));
     publish_rate_hz_ = std::max(1.0, declare_parameter<double>("publish_rate_hz", publish_rate_hz_));
 
     raw_lidar_topic_ = declare_parameter<std::string>("raw_lidar_topic", raw_lidar_topic_);
@@ -649,7 +670,7 @@ private:
     msg.child_frame_id = height_map_frame_;
     msg.transform.translation.x = odom.pose.pose.position.x;
     msg.transform.translation.y = odom.pose.pose.position.y;
-    msg.transform.translation.z = odom.pose.pose.position.z;
+    msg.transform.translation.z = latest_height_origin_z_;
     msg.transform.rotation = tf2::toMsg(yawOnlyQuaternion(odom.pose.pose.orientation));
     if (output_tf_broadcaster_) {
       output_tf_broadcaster_->sendTransform(msg);
@@ -845,10 +866,16 @@ private:
 
     const tf2::Quaternion q_map_height = yawOnlyQuaternion(odom.pose.pose.orientation);
     const tf2::Quaternion q_height_map = q_map_height.inverse();
-    const tf2::Vector3 p_map_target(
+    static const std::vector<MapPoint> empty_map_points;
+    const double height_origin_z = resolveHeightOriginZ(
+      map_points ? *map_points : empty_map_points,
+      odom,
+      q_height_map);
+    latest_height_origin_z_ = height_origin_z;
+    const tf2::Vector3 p_map_height_origin(
       odom.pose.pose.position.x,
       odom.pose.pose.position.y,
-      odom.pose.pose.position.z);
+      height_origin_z);
 
     const auto width = grid.spec.width();
     const auto height = grid.spec.height();
@@ -865,7 +892,7 @@ private:
       for (const auto & point : *map_points) {
         const tf2::Vector3 p_height = tf2::quatRotate(
           q_height_map,
-          tf2::Vector3(point.x, point.y, point.z) - p_map_target);
+          tf2::Vector3(point.x, point.y, point.z) - p_map_height_origin);
         const double x = p_height.x();
         const double y = p_height.y();
         const double z = p_height.z();
@@ -899,14 +926,14 @@ private:
     }
 
     const double local_coverage = localCoverage(local_observed_cells, grid.height.size());
-    fillMissingFromRegisteredCells(grid, support_counts, registered_points, q_height_map, p_map_target);
+    fillMissingFromRegisteredCells(grid, support_counts, registered_points, q_height_map, p_map_height_origin);
     mergeWithPreviousGrid(grid, support_counts);
     fillInitialFloorFromRegisteredCloud(
       grid,
       support_counts,
       registered_points,
       q_height_map,
-      p_map_target,
+      p_map_height_origin,
       local_coverage);
     ++filter_frame_count_;
     applyIsolatedFilter(grid);
@@ -915,6 +942,106 @@ private:
     interpolateMissingCells(grid);
     fillRemainingCells(grid);
     return true;
+  }
+
+  double resolveHeightOriginZ(
+    const std::vector<MapPoint> & map_points,
+    const nav_msgs::msg::Odometry & odom,
+    const tf2::Quaternion & q_height_map)
+  {
+    const double odom_z = odom.pose.pose.position.z;
+    double raw_origin_z = odom_z;
+    if (height_origin_mode_ == "fixed") {
+      raw_origin_z = height_origin_fixed_z_;
+    } else if (height_origin_mode_ == "local_floor") {
+      double floor_z = std::numeric_limits<double>::quiet_NaN();
+      if (estimateLocalFloorOriginZ(map_points, odom, q_height_map, floor_z)) {
+        raw_origin_z = floor_z;
+      } else {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(),
+          *get_clock(),
+          2000,
+          "Not enough local floor points for height_origin.mode=local_floor; falling back to odom z");
+      }
+    } else if (height_origin_mode_ != "odom") {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(),
+        *get_clock(),
+        2000,
+        "Unknown height_origin.mode '%s'; falling back to odom z",
+        height_origin_mode_.c_str());
+    }
+
+    if (!std::isfinite(raw_origin_z)) {
+      raw_origin_z = odom_z;
+    }
+    return filterHeightOriginZ(raw_origin_z);
+  }
+
+  bool estimateLocalFloorOriginZ(
+    const std::vector<MapPoint> & map_points,
+    const nav_msgs::msg::Odometry & odom,
+    const tf2::Quaternion & q_height_map,
+    double & floor_z) const
+  {
+    if (map_points.empty()) {
+      return false;
+    }
+
+    const tf2::Vector3 p_map_target_xy(
+      odom.pose.pose.position.x,
+      odom.pose.pose.position.y,
+      0.0);
+    const double radius2 = height_origin_floor_radius_ * height_origin_floor_radius_;
+
+    std::vector<float> z_candidates;
+    z_candidates.reserve(map_points.size());
+    for (const auto & point : map_points) {
+      const tf2::Vector3 p_height_xy = tf2::quatRotate(
+        q_height_map,
+        tf2::Vector3(point.x, point.y, 0.0) - p_map_target_xy);
+      const double dist2 = p_height_xy.x() * p_height_xy.x() + p_height_xy.y() * p_height_xy.y();
+      if (dist2 > radius2 || !std::isfinite(point.z)) {
+        continue;
+      }
+      z_candidates.push_back(point.z);
+    }
+
+    if (static_cast<int>(z_candidates.size()) < height_origin_floor_min_points_) {
+      return false;
+    }
+
+    std::sort(z_candidates.begin(), z_candidates.end());
+    const auto index = std::min(
+      static_cast<std::size_t>(
+        std::round(height_origin_floor_percentile_ * static_cast<double>(z_candidates.size() - 1))),
+      z_candidates.size() - 1);
+    floor_z = z_candidates[index];
+    return std::isfinite(floor_z);
+  }
+
+  double filterHeightOriginZ(const double raw_origin_z)
+  {
+    if (!height_origin_initialized_) {
+      height_origin_initialized_ = true;
+      filtered_height_origin_z_ = raw_origin_z;
+      return filtered_height_origin_z_;
+    }
+
+    double target_z = raw_origin_z;
+    if (height_origin_max_step_ > 0.0) {
+      const double delta = std::clamp(
+        raw_origin_z - filtered_height_origin_z_,
+        -height_origin_max_step_,
+        height_origin_max_step_);
+      target_z = filtered_height_origin_z_ + delta;
+    }
+
+    filtered_height_origin_z_ =
+      height_origin_filter_alpha_ * target_z +
+      (1.0 - height_origin_filter_alpha_) * filtered_height_origin_z_;
+    return filtered_height_origin_z_;
   }
 
   CellHeight robustCellHeight(std::vector<float> & samples) const
@@ -1588,6 +1715,16 @@ private:
 
   GridSpec grid_spec_;
   double publish_rate_hz_{50.0};
+  std::string height_origin_mode_{"local_floor"};
+  double height_origin_fixed_z_{0.0};
+  double height_origin_filter_alpha_{0.25};
+  double height_origin_max_step_{0.03};
+  double height_origin_floor_radius_{0.6};
+  double height_origin_floor_percentile_{0.20};
+  int height_origin_floor_min_points_{20};
+  bool height_origin_initialized_{false};
+  double filtered_height_origin_z_{0.0};
+  double latest_height_origin_z_{0.0};
   std::string raw_lidar_topic_{"/livox/lidar"};
   std::string raw_imu_topic_{"/livox/imu"};
   bool monitor_raw_lidar_{false};
