@@ -176,6 +176,23 @@ print(value("lidar_frame", "livox_frame"))
 PY
 }
 
+read_ros_domain_config() {
+  local config_file="$1"
+  /usr/bin/python3 - "${config_file}" <<'PY'
+import os
+import sys
+
+import yaml
+
+with open(sys.argv[1], "r", encoding="utf-8") as stream:
+    data = yaml.safe_load(stream) or {}
+
+params = ((data.get("autonomy_light") or {}).get("ros__parameters")) or {}
+domain = params.get("internal_ros_domain_id", os.environ.get("ROS_DOMAIN_ID", "0"))
+print("" if domain is None else str(domain).strip())
+PY
+}
+
 interface_has_ip() {
   local iface="$1"
   local local_host="$2"
@@ -338,6 +355,14 @@ source_setup_files() {
 }
 
 source_setup_files
+
+if [[ -f "${CONFIG_FILE}" ]]; then
+  INTERNAL_ROS_DOMAIN_ID="${AUTONOMY_LIGHT_INTERNAL_ROS_DOMAIN_ID:-$(read_ros_domain_config "${CONFIG_FILE}")}"
+  if [[ -n "${INTERNAL_ROS_DOMAIN_ID}" ]]; then
+    export ROS_DOMAIN_ID="${INTERNAL_ROS_DOMAIN_ID}"
+    echo "ROS_DOMAIN_ID internal=${ROS_DOMAIN_ID}"
+  fi
+fi
 
 EXTRA_ROS_ARGS=()
 if [[ "${MODE}" == "sim" ]]; then

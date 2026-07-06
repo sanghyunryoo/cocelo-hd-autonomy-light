@@ -49,7 +49,7 @@
       publish_odometry_without_downsample: false
 
     publish:
-      path_en: false
+      path_en: true
       scan_publish_en: false
       scan_bodyframe_pub_en: false
       local_map_en: true

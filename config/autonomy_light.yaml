@@ -13,6 +13,14 @@ autonomy_light:
     elevation_y_length: 1.2
     publish_rate_hz: 50.0
 
+    # ROS 2 domain split: keep heavy perception internal, publish only control-facing
+    # outputs on the external domain. Set debug_local_map_ros_domain_id to the
+    # internal domain to keep local_map private, or to the external domain to view it there.
+    internal_ros_domain_id: 42
+    external_ros_domain_id: 0
+    debug_local_map_ros_domain_id: 42
+    debug_local_map_topic: "/point_lio/local_map"
+
     # Optional defaults for MID360 + Point-LIO integration.
     livox_interface: "enP8p1s0"
     livox_host_ip: "192.168.1.50/24"
@@ -22,9 +30,11 @@ autonomy_light:
     monitor_raw_lidar: false
     point_lio_odom_topic: "/aft_mapped_to_init"
     point_lio_map_topic: "/point_lio/local_map"
+    point_lio_path_topic: "/path"
     point_lio_registered_topic: "/cloud_registered"
     odom_output_topic: "/autonomy_light/odom"
     height_map_topic: "/autonomy_light/height_map"
+    path_output_topic: "/path"
     interpolation_max_passes: 2
     interpolation_min_neighbors: 3
     fill_remaining_height: 0.0

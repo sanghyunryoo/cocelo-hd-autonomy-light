@@ -23,6 +23,7 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
@@ -179,12 +180,11 @@ class AutonomyLightNode final : public rclcpp::Node
 {
 public:
   AutonomyLightNode()
-  : Node("autonomy_light"),
-    static_tf_broadcaster_(this),
-    tf_broadcaster_(std::make_shared<tf2_ros::TransformBroadcaster>(this))
+  : Node("autonomy_light")
   {
     loadParameters();
     configureTransform();
+    configureDomainOutputs();
     createIo();
     publishStaticTransform();
     startExternalProcesses();
@@ -203,6 +203,20 @@ public:
   ~AutonomyLightNode() override
   {
     child_processes_.stopAll();
+    debug_local_map_pub_.reset();
+    height_map_pub_.reset();
+    odom_pub_.reset();
+    path_pub_.reset();
+    output_static_tf_broadcaster_.reset();
+    output_tf_broadcaster_.reset();
+    debug_node_.reset();
+    output_node_.reset();
+    if (debug_context_ && debug_context_->is_valid()) {
+      debug_context_->shutdown("autonomy_light shutdown");
+    }
+    if (output_context_ && output_context_->is_valid()) {
+      output_context_->shutdown("autonomy_light shutdown");
+    }
   }
 
 private:
@@ -212,6 +226,15 @@ private:
     height_map_frame_ = declare_parameter<std::string>("height_map_frame", height_map_frame_);
     lidar_frame_ = declare_parameter<std::string>("lidar_frame", lidar_frame_);
     odom_frame_ = declare_parameter<std::string>("odom_frame", odom_frame_);
+    internal_ros_domain_id_ = static_cast<int>(
+      declare_parameter<int>("internal_ros_domain_id", internal_ros_domain_id_));
+    external_ros_domain_id_ = static_cast<int>(
+      declare_parameter<int>("external_ros_domain_id", external_ros_domain_id_));
+    debug_local_map_ros_domain_id_ = static_cast<int>(
+      declare_parameter<int>(
+        "debug_local_map_ros_domain_id", debug_local_map_ros_domain_id_));
+    debug_local_map_topic_ = declare_parameter<std::string>(
+      "debug_local_map_topic", debug_local_map_topic_);
 
     target_to_lidar_xyz_ = declareVectorParameter(
       "target_to_lidar_xyz", target_to_lidar_xyz_, 3);
@@ -234,10 +257,13 @@ private:
       "point_lio_odom_topic", point_lio_odom_topic_);
     point_lio_map_topic_ = declare_parameter<std::string>(
       "point_lio_map_topic", point_lio_map_topic_);
+    point_lio_path_topic_ = declare_parameter<std::string>(
+      "point_lio_path_topic", point_lio_path_topic_);
     point_lio_registered_topic_ = declare_parameter<std::string>(
       "point_lio_registered_topic", point_lio_registered_topic_);
     odom_output_topic_ = declare_parameter<std::string>("odom_output_topic", odom_output_topic_);
     height_map_topic_ = declare_parameter<std::string>("height_map_topic", height_map_topic_);
+    path_output_topic_ = declare_parameter<std::string>("path_output_topic", path_output_topic_);
     heartbeat_topic_ = declare_parameter<std::string>("heartbeat_topic", heartbeat_topic_);
     interpolation_max_passes_ = std::max(
       0,
@@ -358,6 +384,21 @@ private:
     point_lio_config_file_ = declare_parameter<std::string>(
       "point_lio_config_file", point_lio_config_file_);
 
+    const auto actual_domain =
+      static_cast<int>(get_node_base_interface()->get_context()->get_domain_id());
+    if (internal_ros_domain_id_ < 0) {
+      internal_ros_domain_id_ = actual_domain;
+    }
+    if (external_ros_domain_id_ < 0) {
+      external_ros_domain_id_ = actual_domain;
+    }
+    if (debug_local_map_ros_domain_id_ < 0) {
+      debug_local_map_ros_domain_id_ = internal_ros_domain_id_;
+    }
+    if (debug_local_map_topic_.empty()) {
+      debug_local_map_topic_ = point_lio_map_topic_;
+    }
+
     latest_grid_ = ElevationGrid(grid_spec_);
   }
 
@@ -385,14 +426,82 @@ private:
     target_to_lidar_quaternion_ = q;
   }
 
-  void createIo()
+  rclcpp::Node::SharedPtr createDomainNode(
+    const std::string & name,
+    const int domain_id,
+    rclcpp::Context::SharedPtr & context_storage) const
   {
-    height_map_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+    rclcpp::InitOptions init_options;
+    init_options.set_domain_id(static_cast<std::size_t>(std::max(0, domain_id)));
+    context_storage = std::make_shared<rclcpp::Context>();
+    const char * argv[] = {name.c_str()};
+    context_storage->init(1, argv, init_options);
+
+    rclcpp::NodeOptions options;
+    options.context(context_storage);
+    options.start_parameter_services(false);
+    options.start_parameter_event_publisher(false);
+    return std::make_shared<rclcpp::Node>(name, options);
+  }
+
+  void configureDomainOutputs()
+  {
+    const auto actual_internal_domain =
+      static_cast<int>(get_node_base_interface()->get_context()->get_domain_id());
+    if (internal_ros_domain_id_ != actual_internal_domain) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Configured internal_ros_domain_id=%d but current node domain is %d. "
+        "launch.sh should export ROS_DOMAIN_ID before starting this node.",
+        internal_ros_domain_id_,
+        actual_internal_domain);
+      internal_ros_domain_id_ = actual_internal_domain;
+    }
+
+    rclcpp::Node * output_node = this;
+    if (external_ros_domain_id_ != internal_ros_domain_id_) {
+      output_node_ = createDomainNode(
+        "autonomy_light_external_output",
+        external_ros_domain_id_,
+        output_context_);
+      output_node = output_node_.get();
+    }
+
+    height_map_pub_ = output_node->create_publisher<sensor_msgs::msg::PointCloud2>(
       height_map_topic_,
       rclcpp::QoS(rclcpp::KeepLast(2)).reliable().durability_volatile());
-    odom_pub_ = create_publisher<nav_msgs::msg::Odometry>(
+    odom_pub_ = output_node->create_publisher<nav_msgs::msg::Odometry>(
       odom_output_topic_,
       rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile());
+    path_pub_ = output_node->create_publisher<nav_msgs::msg::Path>(
+      path_output_topic_,
+      rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile());
+    output_static_tf_broadcaster_ =
+      std::make_shared<tf2_ros::StaticTransformBroadcaster>(output_node);
+    output_tf_broadcaster_ =
+      std::make_shared<tf2_ros::TransformBroadcaster>(output_node);
+
+    if (debug_local_map_ros_domain_id_ != internal_ros_domain_id_) {
+      debug_node_ = createDomainNode(
+        "autonomy_light_debug_local_map",
+        debug_local_map_ros_domain_id_,
+        debug_context_);
+      debug_local_map_pub_ = debug_node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+        debug_local_map_topic_,
+        rclcpp::SensorDataQoS());
+    }
+
+    RCLCPP_INFO(
+      get_logger(),
+      "ROS domains: internal=%d external=%d debug_local_map=%d%s",
+      internal_ros_domain_id_,
+      external_ros_domain_id_,
+      debug_local_map_ros_domain_id_,
+      debug_local_map_pub_ ? "" : " (not republished)");
+  }
+
+  void createIo()
+  {
     heartbeat_pub_ = create_publisher<std_msgs::msg::String>(heartbeat_topic_, 10);
 
     if (monitor_raw_lidar_) {
@@ -408,6 +517,12 @@ private:
       rclcpp::QoS(rclcpp::KeepLast(20)).reliable().durability_volatile(),
       [this](nav_msgs::msg::Odometry::SharedPtr msg) {
         onPointLioOdom(std::move(msg));
+      });
+    path_sub_ = create_subscription<nav_msgs::msg::Path>(
+      point_lio_path_topic_,
+      rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile(),
+      [this](nav_msgs::msg::Path::SharedPtr msg) {
+        onPointLioPath(std::move(msg));
       });
     map_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
       point_lio_map_topic_,
@@ -442,7 +557,9 @@ private:
     msg.transform.translation.y = target_to_lidar_translation_.y();
     msg.transform.translation.z = target_to_lidar_translation_.z();
     msg.transform.rotation = tf2::toMsg(target_to_lidar_quaternion_);
-    static_tf_broadcaster_.sendTransform(msg);
+    if (output_static_tf_broadcaster_) {
+      output_static_tf_broadcaster_->sendTransform(msg);
+    }
   }
 
   tf2::Quaternion yawOnlyQuaternion(const geometry_msgs::msg::Quaternion & orientation) const
@@ -476,7 +593,9 @@ private:
     msg.transform.translation.y = odom.pose.pose.position.y;
     msg.transform.translation.z = odom.pose.pose.position.z;
     msg.transform.rotation = tf2::toMsg(yawOnlyQuaternion(odom.pose.pose.orientation));
-    tf_broadcaster_->sendTransform(msg);
+    if (output_tf_broadcaster_) {
+      output_tf_broadcaster_->sendTransform(msg);
+    }
   }
 
   void startExternalProcesses()
@@ -519,7 +638,7 @@ private:
       "-p", "preprocess.scan_line:=4",
       "-p", "preprocess.blind:=0.5",
       "-p", "point_filter_num:=1",
-      "-p", "publish.path_en:=false",
+      "-p", "publish.path_en:=true",
       "-p", "publish.scan_publish_en:=false",
       "-p", "publish.scan_bodyframe_pub_en:=false",
       "-p", "publish.local_map_en:=true",
@@ -564,6 +683,11 @@ private:
 
   void onPointLioMap(sensor_msgs::msg::PointCloud2::SharedPtr msg)
   {
+    if (debug_local_map_pub_) {
+      auto debug_msg = *msg;
+      debug_local_map_pub_->publish(debug_msg);
+    }
+
     auto points = std::make_shared<std::vector<MapPoint>>();
     points->reserve(static_cast<std::size_t>(msg->width) * msg->height);
     try {
@@ -1286,6 +1410,13 @@ private:
     ++odom_count_;
   }
 
+  void onPointLioPath(nav_msgs::msg::Path::SharedPtr msg)
+  {
+    if (path_pub_) {
+      path_pub_->publish(*msg);
+    }
+  }
+
   void publishLatest()
   {
     ElevationGrid grid;
@@ -1387,6 +1518,10 @@ private:
   std::string height_map_frame_{"base_link_gravity"};
   std::string lidar_frame_{"mid360"};
   std::string odom_frame_{"odom"};
+  int internal_ros_domain_id_{-1};
+  int external_ros_domain_id_{-1};
+  int debug_local_map_ros_domain_id_{-1};
+  std::string debug_local_map_topic_{"/point_lio/local_map"};
   std::vector<double> target_to_lidar_xyz_{0.0, 0.0, 0.3};
   std::vector<double> target_to_lidar_rpy_{0.0, 0.0, 0.0};
   tf2::Vector3 target_to_lidar_translation_{0.0, 0.0, 0.3};
@@ -1400,9 +1535,11 @@ private:
   bool monitor_raw_lidar_{false};
   std::string point_lio_odom_topic_{"/aft_mapped_to_init"};
   std::string point_lio_map_topic_{"/point_lio/local_map"};
+  std::string point_lio_path_topic_{"/path"};
   std::string point_lio_registered_topic_{"/cloud_registered"};
   std::string odom_output_topic_{"/autonomy_light/odom"};
   std::string height_map_topic_{"/autonomy_light/height_map"};
+  std::string path_output_topic_{"/path"};
   std::string heartbeat_topic_{"/autonomy_light/heartbeat"};
   int interpolation_max_passes_{8};
   int interpolation_min_neighbors_{1};
@@ -1466,14 +1603,21 @@ private:
   rclcpp::Time last_map_time_{0, 0u, RCL_SYSTEM_TIME};
 
   ChildProcesses child_processes_;
-  tf2_ros::StaticTransformBroadcaster static_tf_broadcaster_;
-  std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+  rclcpp::Context::SharedPtr output_context_;
+  rclcpp::Node::SharedPtr output_node_;
+  rclcpp::Context::SharedPtr debug_context_;
+  rclcpp::Node::SharedPtr debug_node_;
+  std::shared_ptr<tf2_ros::StaticTransformBroadcaster> output_static_tf_broadcaster_;
+  std::shared_ptr<tf2_ros::TransformBroadcaster> output_tf_broadcaster_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr registered_sub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_local_map_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr height_map_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr heartbeat_pub_;
   rclcpp::TimerBase::SharedPtr publish_timer_;
   rclcpp::TimerBase::SharedPtr heartbeat_timer_;
