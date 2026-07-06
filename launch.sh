@@ -40,6 +40,7 @@ EOF
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 INSTALL_PREFIX_DIR="$(cd -- "${SCRIPT_DIR}/../../.." 2>/dev/null && pwd || true)"
+CALLER_WORKSPACE_DIR="$(pwd)"
 ROS_DISTRO_NAME="${ROS_DISTRO:-humble}"
 MODE="real"
 NO_DRIVERS="false"
@@ -301,24 +302,42 @@ configure_livox_network() {
   echo "Livox MID360 network: iface=${iface} host=${host_ip} lidar=${lidar_ip} config=${LIVOX_CONFIG_PATH}"
 }
 
-if [[ -f "/opt/ros/${ROS_DISTRO_NAME}/setup.bash" ]]; then
+source_setup_file() {
+  local setup_file="$1"
+  [[ -f "${setup_file}" ]] || return 1
+  case ":${AUTONOMY_LIGHT_SOURCED_SETUPS:-}:" in
+    *":${setup_file}:"*)
+      return 0
+      ;;
+  esac
   set +u
   # shellcheck source=/dev/null
-  source "/opt/ros/${ROS_DISTRO_NAME}/setup.bash"
+  source "${setup_file}"
   set -u
-fi
+  AUTONOMY_LIGHT_SOURCED_SETUPS="${AUTONOMY_LIGHT_SOURCED_SETUPS:-}:${setup_file}"
+  echo "sourced: ${setup_file}"
+}
 
-if [[ -f "${SOURCE_WORKSPACE_DIR}/install/setup.bash" ]]; then
-  set +u
-  # shellcheck source=/dev/null
-  source "${SOURCE_WORKSPACE_DIR}/install/setup.bash"
-  set -u
-elif [[ -n "${INSTALL_PREFIX_DIR}" && -f "${INSTALL_PREFIX_DIR}/setup.bash" ]]; then
-  set +u
-  # shellcheck source=/dev/null
-  source "${INSTALL_PREFIX_DIR}/setup.bash"
-  set -u
-fi
+source_setup_files() {
+  local ros_setup="/opt/ros/${ROS_DISTRO_NAME}/setup.bash"
+  if ! source_setup_file "${ros_setup}"; then
+    echo "error: ROS setup file not found: ${ros_setup}" >&2
+    exit 1
+  fi
+
+  source_setup_file "${SOURCE_WORKSPACE_DIR}/install/setup.bash" || true
+  if [[ -n "${INSTALL_PREFIX_DIR}" ]]; then
+    source_setup_file "${INSTALL_PREFIX_DIR}/setup.bash" || true
+  fi
+  source_setup_file "${CALLER_WORKSPACE_DIR}/install/setup.bash" || true
+
+  if ! command -v ros2 >/dev/null 2>&1; then
+    echo "error: ros2 command not found after sourcing setup files." >&2
+    exit 1
+  fi
+}
+
+source_setup_files
 
 EXTRA_ROS_ARGS=()
 if [[ "${MODE}" == "sim" ]]; then
