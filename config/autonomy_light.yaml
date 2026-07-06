@@ -28,7 +28,7 @@ autonomy_light:
     # internal domain to keep local_map private, or to the external domain to view it there.
     internal_ros_domain_id: 42
     external_ros_domain_id: 0
-    debug_local_map_ros_domain_id: 0
+    debug_local_map_ros_domain_id: 42
     debug_local_map_topic: "/point_lio/local_map"
     
     # Optional defaults for MID360 + Point-LIO integration.
@@ -52,8 +52,14 @@ autonomy_light:
     algorithm:
       # robust: existing autonomy-light selector, autonomy_min_z: autonomy MinZElevationBackend style.
       elevation_backend: "autonomy_min_z"
+      clipping:
+        enabled: true
+        min_z: 0.0
+        max_z: 0.48
       min_z:
-        min_points_per_cell: 1
+        min_points_per_cell: 2
+        supported_min_enabled: true
+        support_band: 0.035
       cloud_registered_fill:
         enabled: false
         percentile: 0.15
@@ -72,7 +78,7 @@ autonomy_light:
         cell_height_percentile: 0.15
         temporal_alpha: 1.0
       isolated_filter:
-        radius: 0
+        radius: 1
         min_support_neighbors: 2
         support_height_diff: 0.025
         outlier_height_diff: 0.05

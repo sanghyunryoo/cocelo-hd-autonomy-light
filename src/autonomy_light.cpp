@@ -312,10 +312,18 @@ private:
     fill_remaining_height_ = declare_parameter<double>("fill_remaining_height", fill_remaining_height_);
     elevation_backend_ = declare_parameter<std::string>(
       "algorithm.elevation_backend", elevation_backend_);
+    clipping_enabled_ = declare_parameter<bool>("algorithm.clipping.enabled", clipping_enabled_);
+    clipping_min_z_ = declare_parameter<double>("algorithm.clipping.min_z", clipping_min_z_);
+    clipping_max_z_ = declare_parameter<double>("algorithm.clipping.max_z", clipping_max_z_);
     min_z_min_points_per_cell_ = std::max(
       1,
       static_cast<int>(declare_parameter<int>(
         "algorithm.min_z.min_points_per_cell", min_z_min_points_per_cell_)));
+    min_z_supported_min_enabled_ = declare_parameter<bool>(
+      "algorithm.min_z.supported_min_enabled", min_z_supported_min_enabled_);
+    min_z_support_band_ = std::max(
+      0.0,
+      declare_parameter<double>("algorithm.min_z.support_band", min_z_support_band_));
     cloud_registered_fill_enabled_ = declare_parameter<bool>(
       "algorithm.cloud_registered_fill.enabled", cloud_registered_fill_enabled_);
     cloud_registered_fill_percentile_ = std::clamp(
@@ -970,11 +978,13 @@ private:
       p_map_height_origin,
       local_coverage);
     ++filter_frame_count_;
+    applyHeightClipping(grid);
     applyIsolatedFilter(grid);
     fillHoles(grid);
     applyBilateralFilter(grid);
     interpolateMissingCells(grid);
     fillRemainingCells(grid);
+    applyHeightClipping(grid);
     return true;
   }
 
@@ -1100,16 +1110,35 @@ private:
     return {samples[clamped_index], support_count};
   }
 
-  CellHeight minZCellHeight(const std::vector<float> & samples) const
+  CellHeight minZCellHeight(std::vector<float> & samples) const
   {
     if (static_cast<int>(samples.size()) < min_z_min_points_per_cell_) {
       return {};
     }
-    const auto min_it = std::min_element(samples.begin(), samples.end());
-    if (min_it == samples.end()) {
-      return {};
+
+    if (!min_z_supported_min_enabled_ || min_z_min_points_per_cell_ <= 1) {
+      const auto min_it = std::min_element(samples.begin(), samples.end());
+      if (min_it == samples.end()) {
+        return {};
+      }
+      return {*min_it, static_cast<int>(samples.size())};
     }
-    return {*min_it, static_cast<int>(samples.size())};
+
+    std::sort(samples.begin(), samples.end());
+    for (auto candidate = samples.begin(); candidate != samples.end(); ++candidate) {
+      const float support_limit = *candidate + static_cast<float>(min_z_support_band_);
+      const auto support_end = std::upper_bound(candidate, samples.end(), support_limit);
+      const int support_count = static_cast<int>(std::distance(candidate, support_end));
+      if (support_count >= min_z_min_points_per_cell_) {
+        float sum = 0.0F;
+        for (auto it = candidate; it != support_end; ++it) {
+          sum += *it;
+        }
+        return {sum / static_cast<float>(support_count), support_count};
+      }
+    }
+
+    return {};
   }
 
   CellHeight selectCellHeight(std::vector<float> & samples)
@@ -1126,6 +1155,21 @@ private:
         elevation_backend_.c_str());
     }
     return robustCellHeight(samples);
+  }
+
+  void applyHeightClipping(ElevationGrid & grid) const
+  {
+    if (!clipping_enabled_) {
+      return;
+    }
+
+    const auto min_z = static_cast<float>(std::min(clipping_min_z_, clipping_max_z_));
+    const auto max_z = static_cast<float>(std::max(clipping_min_z_, clipping_max_z_));
+    for (auto & height : grid.height) {
+      if (std::isfinite(height)) {
+        height = std::clamp(height, min_z, max_z);
+      }
+    }
   }
 
   void mergeWithPreviousGrid(ElevationGrid & grid, const std::vector<int> & support_counts)
@@ -1804,7 +1848,12 @@ private:
   int interpolation_min_neighbors_{1};
   double fill_remaining_height_{0.0};
   std::string elevation_backend_{"robust"};
+  bool clipping_enabled_{false};
+  double clipping_min_z_{-std::numeric_limits<double>::infinity()};
+  double clipping_max_z_{std::numeric_limits<double>::infinity()};
   int min_z_min_points_per_cell_{1};
+  bool min_z_supported_min_enabled_{false};
+  double min_z_support_band_{0.03};
   bool cloud_registered_fill_enabled_{true};
   double cloud_registered_fill_percentile_{0.15};
   int cloud_registered_fill_min_points_per_cell_{2};
