@@ -1,7 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
-// #include <livox_ros_driver2/msg/custom_msg.hpp>
+#include <livox_ros_driver2/msg/custom_msg.hpp>
 
 using namespace std;
 
@@ -141,7 +141,7 @@ public:
 
     ~Preprocess();
 
-    // void process(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
+    void process(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
 
     void process(const sensor_msgs::msg::PointCloud2::SharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
 
@@ -159,7 +159,7 @@ public:
 
 
 private:
-    // void avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg);
+    void avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg);
     void avia_handler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg);
 
     void oust64_handler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg);

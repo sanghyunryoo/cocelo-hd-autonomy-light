@@ -106,10 +106,28 @@ void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num) {
     point_filter_num = pfilt_num;
 }
 
-// void Preprocess::process(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg, PointCloudXYZI::Ptr &pcl_out) {
-//     avia_handler(msg);
-//     *pcl_out = pl_surf;
-// }
+void Preprocess::process(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg, PointCloudXYZI::Ptr &pcl_out) {
+    switch (time_unit) {
+        case SEC:
+            time_unit_scale = 1.e3f;
+            break;
+        case MS:
+            time_unit_scale = 1.f;
+            break;
+        case US:
+            time_unit_scale = 1.e-3f;
+            break;
+        case NS:
+            time_unit_scale = 1.e-6f;
+            break;
+        default:
+            time_unit_scale = 1.f;
+            break;
+    }
+
+    avia_handler(msg);
+    *pcl_out = pl_surf;
+}
 
 void Preprocess::process(const sensor_msgs::msg::PointCloud2::SharedPtr &msg, PointCloudXYZI::Ptr &pcl_out) {
     switch (time_unit) {
@@ -158,48 +176,62 @@ void Preprocess::process(const sensor_msgs::msg::PointCloud2::SharedPtr &msg, Po
     *pcl_out = pl_surf;
 }
 
-// void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg) {
-//     pl_surf.clear();
-//     pl_corn.clear();
-//     pl_full.clear();
-//     double t1 = omp_get_wtime();
-//     int plsize = msg->point_num;
+void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg) {
+    pl_surf.clear();
+    pl_corn.clear();
+    pl_full.clear();
+    const int plsize = static_cast<int>(msg->point_num);
+    if (plsize <= 1) {
+        return;
+    }
 
-//     pl_corn.reserve(plsize);
-//     pl_surf.reserve(plsize);
-//     pl_full.resize(plsize);
+    pl_corn.reserve(plsize);
+    pl_surf.reserve(plsize);
+    pl_full.resize(plsize);
 
-//     uint valid_num = 0;
+    uint valid_num = 0;
+    for (int i = 1; i < plsize; i++) {
+        const auto &src = msg->points[static_cast<std::size_t>(i)];
+        if ((src.line >= N_SCANS) || !is_valid_livox_tag(src.tag)) {
+            continue;
+        }
 
-//     for (uint i = 1; i < plsize; i++) {
-//         if ((msg->points[i].line < N_SCANS) &&
-//             ((msg->points[i].tag & 0x30) == 0x10 || (msg->points[i].tag & 0x30) == 0x00)) {
-//             valid_num++;
-//             if (valid_num % point_filter_num == 0) {
-//                 pl_full[i].x = msg->points[i].x;
-//                 pl_full[i].y = msg->points[i].y;
-//                 pl_full[i].z = msg->points[i].z;
-//                 pl_full[i].intensity = msg->points[i].reflectivity;
-//                 pl_full[i].curvature = msg->points[i].offset_time /
-//                                        float(1000000); // use curvature as time of each laser points, curvature unit: ms
+        valid_num++;
+        if (point_filter_num > 1 && valid_num % point_filter_num != 0) {
+            continue;
+        }
 
-//                 if (i == 0) pl_full[i].curvature = fabs(pl_full[i].curvature) < 1.0 ? pl_full[i].curvature : 0.0;
-//                 else pl_full[i].curvature =
-//                              fabs(pl_full[i].curvature - pl_full[i - 1].curvature) < 1.0 ? pl_full[i].curvature :
-//                              pl_full[i - 1].curvature + 0.004166667f;
+        auto &dst = pl_full[static_cast<std::size_t>(i)];
+        dst.x = src.x;
+        dst.y = src.y;
+        dst.z = src.z;
+        dst.intensity = src.reflectivity;
+        dst.curvature = static_cast<float>(src.offset_time) * time_unit_scale;
 
-//                 if ((abs(pl_full[i].x - pl_full[i - 1].x) > 1e-7)
-//                     || (abs(pl_full[i].y - pl_full[i - 1].y) > 1e-7)
-//                     || (abs(pl_full[i].z - pl_full[i - 1].z) > 1e-7)
-//                        && (pl_full[i].x * pl_full[i].x + pl_full[i].y * pl_full[i].y + pl_full[i].z * pl_full[i].z >
-//                            (blind * blind))) {
-//                     pl_surf.push_back(pl_full[i]);
-//                 }
-//             }
-//         }
-//     }
+        if (!std::isfinite(dst.x) || !std::isfinite(dst.y) || !std::isfinite(dst.z)) {
+            continue;
+        }
+        if (i == 1) {
+            dst.curvature = std::fabs(dst.curvature) < 1.0F ? dst.curvature : 0.0F;
+        } else {
+            const auto &prev = pl_full[static_cast<std::size_t>(i - 1)];
+            dst.curvature = std::fabs(dst.curvature - prev.curvature) < 1.0F ?
+                dst.curvature :
+                prev.curvature + 0.004166667F;
+        }
 
-// }
+        const auto &prev = pl_full[static_cast<std::size_t>(i - 1)];
+        const bool non_duplicate =
+            std::fabs(dst.x - prev.x) > 1.0e-7F ||
+            std::fabs(dst.y - prev.y) > 1.0e-7F ||
+            std::fabs(dst.z - prev.z) > 1.0e-7F;
+        const bool outside_blind =
+            dst.x * dst.x + dst.y * dst.y + dst.z * dst.z > static_cast<float>(blind * blind);
+        if (non_duplicate && outside_blind) {
+            pl_surf.push_back(dst);
+        }
+    }
+}
 
 void Preprocess::avia_handler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
     pl_surf.clear();

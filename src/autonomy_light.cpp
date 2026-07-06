@@ -285,6 +285,7 @@ private:
     publish_rate_hz_ = std::max(1.0, declare_parameter<double>("publish_rate_hz", publish_rate_hz_));
 
     raw_lidar_topic_ = declare_parameter<std::string>("raw_lidar_topic", raw_lidar_topic_);
+    raw_lidar_msg_type_ = declare_parameter<std::string>("raw_lidar_msg_type", raw_lidar_msg_type_);
     raw_imu_topic_ = declare_parameter<std::string>("raw_imu_topic", raw_imu_topic_);
     monitor_raw_lidar_ = declare_parameter<bool>("monitor_raw_lidar", monitor_raw_lidar_);
     point_lio_odom_topic_ = declare_parameter<std::string>(
@@ -677,6 +678,28 @@ private:
     }
   }
 
+  void publishTargetFrameTransform(const nav_msgs::msg::Odometry & odom)
+  {
+    if (target_frame_.empty() || target_frame_ == odom_frame_) {
+      return;
+    }
+
+    geometry_msgs::msg::TransformStamped msg;
+    msg.header.stamp = odom.header.stamp;
+    if (msg.header.stamp.sec == 0 && msg.header.stamp.nanosec == 0) {
+      msg.header.stamp = now();
+    }
+    msg.header.frame_id = odom_frame_;
+    msg.child_frame_id = target_frame_;
+    msg.transform.translation.x = odom.pose.pose.position.x;
+    msg.transform.translation.y = odom.pose.pose.position.y;
+    msg.transform.translation.z = odom.pose.pose.position.z;
+    msg.transform.rotation = odom.pose.pose.orientation;
+    if (output_tf_broadcaster_) {
+      output_tf_broadcaster_->sendTransform(msg);
+    }
+  }
+
   void startExternalProcesses()
   {
     if (start_lidar_driver_) {
@@ -710,6 +733,7 @@ private:
       "--params-file", config_file,
       "-p", "common.lid_topic:=" + raw_lidar_topic_,
       "-p", "common.imu_topic:=" + raw_imu_topic_,
+      "-p", "common.lidar_msg_type:=" + raw_lidar_msg_type_,
       "-p", "odom_header_frame_id:=" + odom_frame_,
       "-p", "odom_child_frame_id:=" + target_frame_,
       "-p", "preprocess.lidar_type:=1",
@@ -1625,6 +1649,7 @@ private:
     }
     if (publish_odom) {
       odom_pub_->publish(odom);
+      publishTargetFrameTransform(odom);
       publishHeightMapFrameTransform(odom);
     }
   }
@@ -1726,6 +1751,7 @@ private:
   double filtered_height_origin_z_{0.0};
   double latest_height_origin_z_{0.0};
   std::string raw_lidar_topic_{"/livox/lidar"};
+  std::string raw_lidar_msg_type_{"livox_custom"};
   std::string raw_imu_topic_{"/livox/imu"};
   bool monitor_raw_lidar_{false};
   std::string point_lio_odom_topic_{"/aft_mapped_to_init"};

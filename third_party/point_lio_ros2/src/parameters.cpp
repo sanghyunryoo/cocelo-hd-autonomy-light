@@ -14,6 +14,7 @@ double last_timestamp_lidar = -1.0, last_timestamp_imu = -1.0;
 int pcd_index = 0;
 
 std::string lid_topic, imu_topic;
+std::string lidar_msg_type;
 bool prop_at_freq_of_imu, check_satu, con_frame, cut_frame;
 bool use_imu_as_input, space_down_sample, publish_odometry_without_downsample;
 int init_map_size, con_frame_num;
@@ -65,6 +66,7 @@ void readParameters(shared_ptr<rclcpp::Node> &nh) {
     nh->declare_parameter<int>("point_filter_num", 2);
     nh->declare_parameter<std::string>("common.lid_topic", "/livox/lidar");
     nh->declare_parameter<std::string>("common.imu_topic", "/livox/imu");
+    nh->declare_parameter<std::string>("common.lidar_msg_type", "pointcloud2");
     nh->declare_parameter<bool>("common.con_frame", false);
     nh->declare_parameter<int>("common.con_frame_num", 1);
     nh->declare_parameter<bool>("common.cut_frame", false);
@@ -136,6 +138,7 @@ void readParameters(shared_ptr<rclcpp::Node> &nh) {
     nh->get_parameter("point_filter_num", p_pre->point_filter_num);
     nh->get_parameter("common.lid_topic", lid_topic);
     nh->get_parameter("common.imu_topic", imu_topic);
+    nh->get_parameter("common.lidar_msg_type", lidar_msg_type);
     nh->get_parameter("common.con_frame", con_frame);
     nh->get_parameter("common.con_frame_num", con_frame_num);
     nh->get_parameter("common.cut_frame", cut_frame);

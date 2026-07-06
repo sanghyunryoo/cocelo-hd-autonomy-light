@@ -376,6 +376,7 @@ if [[ "${MODE}" == "sim" ]]; then
     "-p" "use_sim_time:=true"
     "-p" "child_use_sim_time:=true"
     "-p" "raw_lidar_topic:=${RAW_LIDAR_TOPIC}"
+    "-p" "raw_lidar_msg_type:=pointcloud2"
     "-p" "raw_imu_topic:=${RAW_IMU_TOPIC}"
   )
 else
@@ -403,7 +404,7 @@ if [[ -n "${LIVOX_CONFIG_PATH}" && "${MODE}" == "real" && "${NO_DRIVERS}" != "tr
     "-r"
     "__node:=livox_lidar_publisher"
     "-p"
-    "xfer_format:=0"
+    "xfer_format:=1"
     "-p"
     "multi_topic:=0"
     "-p"

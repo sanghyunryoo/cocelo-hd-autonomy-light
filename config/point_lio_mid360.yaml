@@ -3,6 +3,7 @@
     common:
       lid_topic: "/livox/lidar"
       imu_topic: "/livox/imu"
+      lidar_msg_type: "livox_custom"
       con_frame: false
       con_frame_num: 1
       cut_frame: false

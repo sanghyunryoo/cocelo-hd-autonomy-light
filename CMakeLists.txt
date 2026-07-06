@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(livox_ros_driver2 REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(pcl_ros REQUIRED)
@@ -34,6 +35,7 @@ add_executable(autonomy_light
 ament_target_dependencies(autonomy_light
   ament_index_cpp
   geometry_msgs
+  livox_ros_driver2
   nav_msgs
   rclcpp
   sensor_msgs
@@ -74,6 +76,7 @@ target_include_directories(autonomy_light_pointlio_mapping
 
 ament_target_dependencies(autonomy_light_pointlio_mapping
   geometry_msgs
+  livox_ros_driver2
   nav_msgs
   pcl_conversions
   pcl_ros
