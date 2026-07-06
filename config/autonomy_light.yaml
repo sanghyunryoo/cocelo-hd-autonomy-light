@@ -18,20 +18,30 @@ autonomy_light:
     raw_imu_topic: "/livox/imu"
     point_lio_odom_topic: "/aft_mapped_to_init"
     point_lio_map_topic: "/point_lio/local_map"
+    point_lio_registered_topic: "/cloud_registered"
     odom_output_topic: "/autonomy_light/odom"
     height_map_topic: "/autonomy_light/height_map"
     interpolation_max_passes: 8
     interpolation_min_neighbors: 1
     fill_remaining_height: 0.0
     algorithm:
+      cloud_registered_fill:
+        enabled: true
+        percentile: 0.15
+        min_points_per_cell: 2
+        initial_floor_fill_enabled: true
+        initial_floor_max_local_coverage: 0.25
+        floor_min_points: 20
+        floor_support_band: 0.08
+        initial_keep_min_support: 3
       frame_aggregation:
         robust_height_gate: 0.04
         intra_cell_min_support_gap: 0.025
         intra_cell_min_support_count: 3
         edge_mix_height_diff: 0.035
         edge_prefer_prev_support_count: 2
-        cell_height_percentile: 0.30
-        temporal_alpha: 0.65
+        cell_height_percentile: 0.15
+        temporal_alpha: 0.75
       isolated_filter:
         radius: 1
         min_support_neighbors: 2
@@ -41,13 +51,13 @@ autonomy_light:
       hole_fill:
         radius: 1
         min_neighbors: 3
-        max_height_diff: 0.03
+        max_height_diff: 0.02
       bilateral:
         radius: 1
         sigma_spatial: 1.1
-        sigma_height: 0.025
-        max_height_diff: 0.04
-        passes: 2
+        sigma_height: 0.015
+        max_height_diff: 0.025
+        passes: 1
         every_n_frames: 2
     start_lidar_driver: true
     start_point_lio: true

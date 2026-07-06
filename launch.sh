@@ -20,6 +20,14 @@ Options:
                       Override raw LiDAR topic.
   --raw-imu-topic TOPIC
                       Override raw IMU topic.
+  --livox-interface IFACE
+                      Override auto-selected MID360 wired interface.
+  --livox-host-ip CIDR
+                      MID360 host IP/CIDR. Default: 192.168.1.50/24.
+  --livox-lidar-ip IP
+                      MID360 LiDAR IP, or auto. Default: auto.
+  --skip-livox-network
+                      Do not auto-configure MID360 network/config.
 
 Examples:
   ./launch.sh --real
@@ -38,6 +46,12 @@ NO_DRIVERS="false"
 SIM_TOPIC_PREFIX="${AUTONOMY_LIGHT_SIM_TOPIC_PREFIX:-/f4}"
 RAW_LIDAR_TOPIC=""
 RAW_IMU_TOPIC=""
+LIVOX_INTERFACE="${AUTONOMY_LIGHT_LIVOX_INTERFACE:-}"
+LIVOX_HOST_IP="${AUTONOMY_LIGHT_LIVOX_HOST_IP:-}"
+LIVOX_SCAN_CIDR="${AUTONOMY_LIGHT_LIVOX_SCAN_CIDR:-}"
+LIVOX_LIDAR_IP="${AUTONOMY_LIGHT_LIVOX_LIDAR_IP:-}"
+LIVOX_CONFIG_PATH="${AUTONOMY_LIGHT_LIVOX_CONFIG_PATH:-}"
+SKIP_LIVOX_NETWORK="${AUTONOMY_LIGHT_SKIP_LIVOX_NETWORK:-false}"
 
 if [[ -n "${AUTONOMY_LIGHT_CONFIG:-}" ]]; then
   CONFIG_FILE="${AUTONOMY_LIGHT_CONFIG}"
@@ -101,6 +115,34 @@ while [[ $# -gt 0 ]]; do
       RAW_IMU_TOPIC="${1#--raw-imu-topic=}"
       shift
       ;;
+    --livox-interface)
+      LIVOX_INTERFACE="${2:?--livox-interface requires an interface name}"
+      shift 2
+      ;;
+    --livox-interface=*)
+      LIVOX_INTERFACE="${1#--livox-interface=}"
+      shift
+      ;;
+    --livox-host-ip)
+      LIVOX_HOST_IP="${2:?--livox-host-ip requires an IP or CIDR}"
+      shift 2
+      ;;
+    --livox-host-ip=*)
+      LIVOX_HOST_IP="${1#--livox-host-ip=}"
+      shift
+      ;;
+    --livox-lidar-ip)
+      LIVOX_LIDAR_IP="${2:?--livox-lidar-ip requires an IP or auto}"
+      shift 2
+      ;;
+    --livox-lidar-ip=*)
+      LIVOX_LIDAR_IP="${1#--livox-lidar-ip=}"
+      shift
+      ;;
+    --skip-livox-network)
+      SKIP_LIVOX_NETWORK="true"
+      shift
+      ;;
     --)
       shift
       break
@@ -110,6 +152,333 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+read_livox_network_config() {
+  local config_file="$1"
+  /usr/bin/python3 - "${config_file}" <<'PY'
+import sys
+
+import yaml
+
+with open(sys.argv[1], "r", encoding="utf-8") as stream:
+    data = yaml.safe_load(stream) or {}
+
+params = ((data.get("autonomy_light") or {}).get("ros__parameters")) or {}
+
+def value(name, default=""):
+    item = params.get(name, default)
+    return "" if item is None else str(item).strip()
+
+print(value("livox_interface"))
+print(value("livox_host_ip", "192.168.1.50/24"))
+print(value("livox_scan_cidr", "192.168.1.0/24"))
+print(value("livox_lidar_ip", "auto"))
+print(value("lidar_frame", "livox_frame"))
+PY
+}
+
+interface_has_ip() {
+  local iface="$1"
+  local local_host="$2"
+  ip -o -4 addr show dev "${iface}" | awk '{print $4}' | cut -d/ -f1 | grep -Fxq "${local_host}"
+}
+
+interface_has_cidr() {
+  local iface="$1"
+  local cidr="$2"
+  ip -o -4 addr show dev "${iface}" | awk '{print $4}' | grep -Fxq "${cidr}"
+}
+
+find_wired_interface() {
+  local local_host="$1"
+  local candidates=()
+  local wired_candidates=()
+  local iface
+
+  for iface_path in /sys/class/net/*; do
+    iface="$(basename "${iface_path}")"
+    [[ "${iface}" == "lo" ]] && continue
+    [[ -d "/sys/class/net/${iface}/wireless" ]] && continue
+    [[ -e "/sys/class/net/${iface}/bridge" ]] && continue
+    [[ -e "/sys/class/net/${iface}/tun_flags" ]] && continue
+    if interface_has_ip "${iface}" "${local_host}"; then
+      printf '%s\n' "${iface}"
+      return
+    fi
+    wired_candidates+=("${iface}")
+    if [[ -r "/sys/class/net/${iface}/carrier" ]] &&
+      [[ "$(cat "/sys/class/net/${iface}/carrier" 2>/dev/null || true)" == "1" ]]; then
+      candidates+=("${iface}")
+    fi
+  done
+
+  if [[ "${#candidates[@]}" -eq 1 ]]; then
+    printf '%s\n' "${candidates[0]}"
+    return
+  fi
+
+  if [[ "${#candidates[@]}" -eq 0 && "${#wired_candidates[@]}" -eq 1 ]]; then
+    printf '%s\n' "${wired_candidates[0]}"
+    return
+  fi
+
+  if [[ "${#candidates[@]}" -eq 0 ]]; then
+    echo "warning: no connected wired network interface found for Livox MID360." >&2
+  else
+    echo "warning: multiple connected wired interfaces found: ${candidates[*]}" >&2
+  fi
+  echo "warning: set --livox-interface or livox_interface in the autonomy-light config." >&2
+  return 1
+}
+
+find_livox_interface() {
+  local requested_iface="$1"
+  local local_host="$2"
+  if [[ -n "${requested_iface}" ]]; then
+    printf '%s\n' "${requested_iface}"
+    return
+  fi
+  find_wired_interface "${local_host}"
+}
+
+probe_host() {
+  local ip_addr="$1"
+  ping -c 1 -W 1 "${ip_addr}" >/dev/null 2>&1
+}
+
+discover_livox_neighbor_ip() {
+  local iface="$1"
+  local host_ip="$2"
+  local candidates=()
+  local ip_addr state
+
+  while read -r ip_addr state; do
+    [[ -n "${ip_addr}" ]] || continue
+    [[ "${ip_addr}" == "${host_ip}" ]] && continue
+    case "${state}" in
+      FAILED|INCOMPLETE|"")
+        continue
+        ;;
+    esac
+    candidates+=("${ip_addr}")
+  done < <(
+    ip neigh show dev "${iface}" 2>/dev/null |
+      awk '
+        $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {
+          state=$NF
+          has_lladdr=0
+          for (i = 1; i <= NF; ++i) {
+            if ($i == "lladdr") {
+              has_lladdr=1
+            }
+          }
+          if (has_lladdr) {
+            print $1, state
+          }
+        }'
+  )
+
+  if [[ "${#candidates[@]}" -eq 1 ]]; then
+    printf '%s\n' "${candidates[0]}"
+    return 0
+  fi
+
+  return 1
+}
+
+scan_livox_candidates() {
+  local iface="$1"
+  local cidr="$2"
+  local host_ip="$3"
+  local candidate
+  local seen=" "
+
+  for candidate in 192.168.1.12 192.168.1.102 192.168.1.3 192.168.1.1; do
+    [[ "${seen}" == *" ${candidate} "* ]] && continue
+    printf '%s\n' "${candidate}"
+    seen+=" ${candidate} "
+  done
+
+  ip neigh show dev "${iface}" 2>/dev/null |
+    awk '{print $1}' |
+    grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' |
+    while read -r candidate; do
+      [[ "${candidate}" == "${host_ip}" ]] && continue
+      [[ "${seen}" == *" ${candidate} "* ]] && continue
+      printf '%s\n' "${candidate}"
+      seen+=" ${candidate} "
+    done
+
+  if command -v nmap >/dev/null 2>&1; then
+    nmap -n -sn -e "${iface}" "${cidr}" 2>/dev/null |
+      awk '/Nmap scan report for / {print $NF}' |
+      while read -r candidate; do
+        [[ "${candidate}" == "${host_ip}" ]] && continue
+        [[ "${seen}" == *" ${candidate} "* ]] && continue
+        printf '%s\n' "${candidate}"
+        seen+=" ${candidate} "
+      done
+  fi
+}
+
+discover_livox_ip() {
+  local iface="$1"
+  local cidr="$2"
+  local host_ip="$3"
+  local explicit_ip="$4"
+
+  if [[ -n "${explicit_ip}" && "${explicit_ip}" != "auto" ]]; then
+    printf '%s\n' "${explicit_ip}"
+    return
+  fi
+
+  local neighbor_ip
+  if neighbor_ip="$(discover_livox_neighbor_ip "${iface}" "${host_ip}")"; then
+    printf '%s\n' "${neighbor_ip}"
+    return
+  fi
+
+  local candidate
+  while read -r candidate; do
+    [[ -n "${candidate}" ]] || continue
+    if probe_host "${candidate}"; then
+      printf '%s\n' "${candidate}"
+      return
+    fi
+  done < <(scan_livox_candidates "${iface}" "${cidr}" "${host_ip}")
+
+  return 1
+}
+
+write_livox_mid360_config() {
+  local output_path="$1"
+  local host_ip="$2"
+  local lidar_ip="$3"
+  mkdir -p "$(dirname "${output_path}")"
+  /usr/bin/python3 - "${output_path}" "${host_ip}" "${lidar_ip}" <<'PY'
+import json
+import sys
+
+output_path, host_ip, lidar_ip = sys.argv[1:4]
+config = {
+    "lidar_summary_info": {"lidar_type": 8},
+    "MID360": {
+        "lidar_net_info": {
+            "cmd_data_port": 56100,
+            "push_msg_port": 56200,
+            "point_data_port": 56300,
+            "imu_data_port": 56400,
+            "log_data_port": 56500,
+        },
+        "host_net_info": {
+            "cmd_data_ip": host_ip,
+            "cmd_data_port": 56101,
+            "push_msg_ip": host_ip,
+            "push_msg_port": 56201,
+            "point_data_ip": host_ip,
+            "point_data_port": 56301,
+            "imu_data_ip": host_ip,
+            "imu_data_port": 56401,
+            "log_data_ip": "",
+            "log_data_port": 56501,
+        },
+    },
+    "lidar_configs": [
+        {
+            "ip": lidar_ip,
+            "pcl_data_type": 1,
+            "pattern_mode": 0,
+            "extrinsic_parameter": {
+                "roll": 0.0,
+                "pitch": 0.0,
+                "yaw": 0.0,
+                "x": 0,
+                "y": 0,
+                "z": 0,
+            },
+        }
+    ],
+}
+with open(output_path, "w", encoding="utf-8") as stream:
+    json.dump(config, stream, indent=2)
+    stream.write("\n")
+PY
+}
+
+configure_livox_network() {
+  if [[ "${MODE}" != "real" || "${NO_DRIVERS}" == "true" ]]; then
+    return
+  fi
+  case "${SKIP_LIVOX_NETWORK}" in
+    true|1|yes|on)
+      return
+      ;;
+  esac
+
+  if [[ -n "${LIVOX_CONFIG_PATH}" ]]; then
+    return
+  fi
+
+  if ! command -v ip >/dev/null 2>&1; then
+    echo "warning: 'ip' command not found; skipping Livox network auto setup." >&2
+    return
+  fi
+
+  local cfg_iface cfg_host_cidr cfg_scan_cidr cfg_lidar_ip cfg_frame_id
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    mapfile -t livox_config < <(read_livox_network_config "${CONFIG_FILE}")
+    cfg_iface="${livox_config[0]:-}"
+    cfg_host_cidr="${livox_config[1]:-}"
+    cfg_scan_cidr="${livox_config[2]:-}"
+    cfg_lidar_ip="${livox_config[3]:-}"
+    cfg_frame_id="${livox_config[4]:-}"
+    LIVOX_INTERFACE="${LIVOX_INTERFACE:-${cfg_iface}}"
+    LIVOX_HOST_IP="${AUTONOMY_LIGHT_LIVOX_HOST_IP:-${LIVOX_HOST_IP:-${cfg_host_cidr}}}"
+    LIVOX_SCAN_CIDR="${AUTONOMY_LIGHT_LIVOX_SCAN_CIDR:-${LIVOX_SCAN_CIDR:-${cfg_scan_cidr}}}"
+    LIVOX_LIDAR_IP="${AUTONOMY_LIGHT_LIVOX_LIDAR_IP:-${LIVOX_LIDAR_IP:-${cfg_lidar_ip}}}"
+    LIVOX_FRAME_ID="${cfg_frame_id:-livox_frame}"
+  else
+    LIVOX_FRAME_ID="livox_frame"
+  fi
+
+  local host_cidr="${LIVOX_HOST_IP:-192.168.1.50/24}"
+  local scan_cidr="${LIVOX_SCAN_CIDR:-192.168.1.0/24}"
+  local lidar_ip="${LIVOX_LIDAR_IP:-auto}"
+  local host_ip="${host_cidr%%/*}"
+  [[ "${host_cidr}" == */* ]] || host_cidr="${host_cidr}/24"
+
+  local iface
+  if ! iface="$(find_livox_interface "${LIVOX_INTERFACE}" "${host_ip}")"; then
+    return
+  fi
+  if [[ ! -d "/sys/class/net/${iface}" ]]; then
+    echo "warning: Livox network interface does not exist: ${iface}" >&2
+    return
+  fi
+
+  sudo ip link set "${iface}" up
+  if ! interface_has_cidr "${iface}" "${host_cidr}"; then
+    if ! interface_has_ip "${iface}" "${host_ip}"; then
+      echo "Configuring Livox MID360 host network: ${iface} ${host_cidr}"
+      sudo ip addr add "${host_cidr}" dev "${iface}"
+    fi
+  fi
+
+  local detected_lidar_ip
+  if detected_lidar_ip="$(discover_livox_ip "${iface}" "${scan_cidr}" "${host_ip}" "${lidar_ip}")"; then
+    lidar_ip="${detected_lidar_ip}"
+  elif [[ -z "${lidar_ip}" || "${lidar_ip}" == "auto" ]]; then
+    echo "warning: could not auto-detect Livox MID360 IP on ${iface} ${scan_cidr}; skipping Livox auto config." >&2
+    echo "warning: set --livox-lidar-ip or livox_lidar_ip in the autonomy-light config." >&2
+    return
+  else
+    echo "warning: could not auto-detect Livox MID360 IP on ${iface} ${scan_cidr}; using ${lidar_ip}." >&2
+  fi
+
+  LIVOX_CONFIG_PATH="/tmp/autonomy_light_livox_mid360_config.json"
+  write_livox_mid360_config "${LIVOX_CONFIG_PATH}" "${host_ip}" "${lidar_ip}"
+  echo "Livox MID360 network: iface=${iface} host=${host_ip} lidar=${lidar_ip} config=${LIVOX_CONFIG_PATH}"
+}
 
 if [[ -f "/opt/ros/${ROS_DISTRO_NAME}/setup.bash" ]]; then
   set +u
@@ -155,6 +524,47 @@ fi
 
 if [[ "${NO_DRIVERS}" == "true" ]]; then
   EXTRA_ROS_ARGS+=("-p" "start_lidar_driver:=false" "-p" "start_point_lio:=false")
+fi
+
+configure_livox_network
+
+if [[ -n "${LIVOX_CONFIG_PATH}" && "${MODE}" == "real" && "${NO_DRIVERS}" != "true" ]]; then
+  LIVOX_DRIVER_COMMAND=(
+    "ros2"
+    "run"
+    "livox_ros_driver2"
+    "livox_ros_driver2_node"
+    "--ros-args"
+    "-r"
+    "__node:=livox_lidar_publisher"
+    "-p"
+    "xfer_format:=1"
+    "-p"
+    "multi_topic:=0"
+    "-p"
+    "data_src:=0"
+    "-p"
+    "publish_freq:=10.0"
+    "-p"
+    "output_data_type:=0"
+    "-p"
+    "frame_id:=${LIVOX_FRAME_ID:-mid360}"
+    "-p"
+    "lvx_file_path:=/tmp/autonomy_light_livox.lvx"
+    "-p"
+    "user_config_path:=${LIVOX_CONFIG_PATH}"
+    "-p"
+    "cmdline_input_bd_code:=livox0000000001"
+  )
+  LIVOX_DRIVER_COMMAND_PARAM="$(
+    /usr/bin/python3 - "${LIVOX_DRIVER_COMMAND[@]}" <<'PY'
+import json
+import sys
+
+print(json.dumps(sys.argv[1:]))
+PY
+  )"
+  EXTRA_ROS_ARGS+=("-p" "lidar_driver_command:=${LIVOX_DRIVER_COMMAND_PARAM}")
 fi
 
 echo "autonomy-light mode=${MODE} config=${CONFIG_FILE}"

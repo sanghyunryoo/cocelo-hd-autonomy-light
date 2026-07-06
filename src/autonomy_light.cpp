@@ -233,6 +233,8 @@ private:
       "point_lio_odom_topic", point_lio_odom_topic_);
     point_lio_map_topic_ = declare_parameter<std::string>(
       "point_lio_map_topic", point_lio_map_topic_);
+    point_lio_registered_topic_ = declare_parameter<std::string>(
+      "point_lio_registered_topic", point_lio_registered_topic_);
     odom_output_topic_ = declare_parameter<std::string>("odom_output_topic", odom_output_topic_);
     height_map_topic_ = declare_parameter<std::string>("height_map_topic", height_map_topic_);
     heartbeat_topic_ = declare_parameter<std::string>("heartbeat_topic", heartbeat_topic_);
@@ -245,6 +247,42 @@ private:
       1,
       8);
     fill_remaining_height_ = declare_parameter<double>("fill_remaining_height", fill_remaining_height_);
+    cloud_registered_fill_enabled_ = declare_parameter<bool>(
+      "algorithm.cloud_registered_fill.enabled", cloud_registered_fill_enabled_);
+    cloud_registered_fill_percentile_ = std::clamp(
+      declare_parameter<double>(
+        "algorithm.cloud_registered_fill.percentile", cloud_registered_fill_percentile_),
+      0.0,
+      1.0);
+    cloud_registered_fill_min_points_per_cell_ = std::max(
+      1,
+      static_cast<int>(declare_parameter<int>(
+        "algorithm.cloud_registered_fill.min_points_per_cell",
+        cloud_registered_fill_min_points_per_cell_)));
+    cloud_registered_initial_floor_fill_enabled_ = declare_parameter<bool>(
+      "algorithm.cloud_registered_fill.initial_floor_fill_enabled",
+      cloud_registered_initial_floor_fill_enabled_);
+    cloud_registered_initial_floor_max_coverage_ = std::clamp(
+      declare_parameter<double>(
+        "algorithm.cloud_registered_fill.initial_floor_max_local_coverage",
+        cloud_registered_initial_floor_max_coverage_),
+      0.0,
+      1.0);
+    cloud_registered_floor_min_points_ = std::max(
+      1,
+      static_cast<int>(declare_parameter<int>(
+        "algorithm.cloud_registered_fill.floor_min_points",
+        cloud_registered_floor_min_points_)));
+    cloud_registered_floor_support_band_ = std::max(
+      0.0,
+      declare_parameter<double>(
+        "algorithm.cloud_registered_fill.floor_support_band",
+        cloud_registered_floor_support_band_));
+    cloud_registered_initial_keep_min_support_ = std::max(
+      1,
+      static_cast<int>(declare_parameter<int>(
+        "algorithm.cloud_registered_fill.initial_keep_min_support",
+        cloud_registered_initial_keep_min_support_)));
     robust_height_gate_ = declare_parameter<double>(
       "algorithm.frame_aggregation.robust_height_gate", robust_height_gate_);
     intra_cell_min_support_gap_ = declare_parameter<double>(
@@ -373,6 +411,12 @@ private:
       rclcpp::SensorDataQoS(),
       [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
         onPointLioMap(std::move(msg));
+      });
+    registered_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+      point_lio_registered_topic_,
+      rclcpp::SensorDataQoS(),
+      [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+        onPointLioRegistered(std::move(msg));
       });
 
     const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -544,16 +588,57 @@ private:
     ++map_count_;
   }
 
+  void onPointLioRegistered(sensor_msgs::msg::PointCloud2::SharedPtr msg)
+  {
+    auto points = std::make_shared<std::vector<MapPoint>>();
+    points->reserve(static_cast<std::size_t>(msg->width) * msg->height);
+    try {
+      sensor_msgs::PointCloud2ConstIterator<float> x_it(*msg, "x");
+      sensor_msgs::PointCloud2ConstIterator<float> y_it(*msg, "y");
+      sensor_msgs::PointCloud2ConstIterator<float> z_it(*msg, "z");
+
+      for (; x_it != x_it.end(); ++x_it, ++y_it, ++z_it) {
+        if (!std::isfinite(*x_it) || !std::isfinite(*y_it) || !std::isfinite(*z_it)) {
+          continue;
+        }
+        points->push_back({*x_it, *y_it, *z_it});
+      }
+    } catch (const std::runtime_error & ex) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(),
+        *get_clock(),
+        2000,
+        "Point-LIO registered cloud cannot be sampled: %s",
+        ex.what());
+      return;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(registered_mutex_);
+      latest_registered_points_ = std::move(points);
+      has_registered_cloud_ = true;
+    }
+  }
+
   bool buildElevationGridFromMap(ElevationGrid & grid)
   {
     std::shared_ptr<const std::vector<MapPoint>> map_points;
+    std::shared_ptr<const std::vector<MapPoint>> registered_points;
     nav_msgs::msg::Odometry odom;
     {
       std::lock_guard<std::mutex> lock(map_mutex_);
-      if (!has_map_ || !latest_map_points_) {
-        return false;
+      if (has_map_ && latest_map_points_) {
+        map_points = latest_map_points_;
       }
-      map_points = latest_map_points_;
+    }
+    {
+      std::lock_guard<std::mutex> lock(registered_mutex_);
+      if (has_registered_cloud_ && latest_registered_points_) {
+        registered_points = latest_registered_points_;
+      }
+    }
+    if (!map_points && !registered_points) {
+      return false;
     }
     {
       std::lock_guard<std::mutex> lock(odom_mutex_);
@@ -583,30 +668,33 @@ private:
 
     std::vector<std::vector<float>> cell_samples(static_cast<std::size_t>(width) * height);
     std::vector<int> support_counts(static_cast<std::size_t>(width) * height, 0);
+    std::size_t local_observed_cells = 0;
 
-    for (const auto & point : *map_points) {
-      const tf2::Vector3 p_height = tf2::quatRotate(
-        q_height_map,
-        tf2::Vector3(point.x, point.y, point.z) - p_map_target);
-      const double x = p_height.x();
-      const double y = p_height.y();
-      const double z = p_height.z();
+    if (map_points) {
+      for (const auto & point : *map_points) {
+        const tf2::Vector3 p_height = tf2::quatRotate(
+          q_height_map,
+          tf2::Vector3(point.x, point.y, point.z) - p_map_target);
+        const double x = p_height.x();
+        const double y = p_height.y();
+        const double z = p_height.z();
 
-      if (x < x_min || x >= x_max || y < y_min || y >= y_max) {
-        continue;
+        if (x < x_min || x >= x_max || y < y_min || y >= y_max) {
+          continue;
+        }
+        if (z < grid.spec.min_z || z > grid.spec.max_z) {
+          continue;
+        }
+
+        const auto col = static_cast<std::uint32_t>((x - x_min) / grid.spec.resolution);
+        const auto row = static_cast<std::uint32_t>((y - y_min) / grid.spec.resolution);
+        if (col >= width || row >= height) {
+          continue;
+        }
+
+        const auto index = static_cast<std::size_t>(row) * width + col;
+        cell_samples[index].push_back(static_cast<float>(z));
       }
-      if (z < grid.spec.min_z || z > grid.spec.max_z) {
-        continue;
-      }
-
-      const auto col = static_cast<std::uint32_t>((x - x_min) / grid.spec.resolution);
-      const auto row = static_cast<std::uint32_t>((y - y_min) / grid.spec.resolution);
-      if (col >= width || row >= height) {
-        continue;
-      }
-
-      const auto index = static_cast<std::size_t>(row) * width + col;
-      cell_samples[index].push_back(static_cast<float>(z));
     }
 
     for (std::size_t index = 0; index < cell_samples.size(); ++index) {
@@ -616,14 +704,25 @@ private:
       const auto cell = robustCellHeight(cell_samples[index]);
       grid.height[index] = cell.height;
       support_counts[index] = cell.support_count;
+      ++local_observed_cells;
     }
 
+    const double local_coverage = localCoverage(local_observed_cells, grid.height.size());
+    fillMissingFromRegisteredCells(grid, support_counts, registered_points, q_height_map, p_map_target);
     mergeWithPreviousGrid(grid, support_counts);
+    fillInitialFloorFromRegisteredCloud(
+      grid,
+      support_counts,
+      registered_points,
+      q_height_map,
+      p_map_target,
+      local_coverage);
     ++filter_frame_count_;
     applyIsolatedFilter(grid);
     fillHoles(grid);
     applyBilateralFilter(grid);
     interpolateMissingCells(grid);
+    fillRemainingCells(grid);
     return true;
   }
 
@@ -943,11 +1042,225 @@ private:
       }
     }
 
-    if (std::isfinite(fill_remaining_height_)) {
-      for (auto & height_value : grid.height) {
-        if (!std::isfinite(height_value)) {
-          height_value = static_cast<float>(fill_remaining_height_);
-        }
+  }
+
+  void fillMissingFromRegisteredCells(
+    ElevationGrid & grid,
+    std::vector<int> & support_counts,
+    const std::shared_ptr<const std::vector<MapPoint>> & registered_points,
+    const tf2::Quaternion & q_height_map,
+    const tf2::Vector3 & p_map_target) const
+  {
+    if (!cloud_registered_fill_enabled_ || !registered_points || registered_points->empty()) {
+      return;
+    }
+
+    const auto width = grid.spec.width();
+    const auto height = grid.spec.height();
+    std::vector<std::vector<float>> registered_cell_samples(
+      static_cast<std::size_t>(width) * height);
+
+    const double x_min = grid.spec.xMin();
+    const double x_max = grid.spec.xMax();
+    const double y_min = grid.spec.yMin();
+    const double y_max = grid.spec.yMax();
+
+    for (const auto & point : *registered_points) {
+      const tf2::Vector3 p_height = tf2::quatRotate(
+        q_height_map,
+        tf2::Vector3(point.x, point.y, point.z) - p_map_target);
+      const double x = p_height.x();
+      const double y = p_height.y();
+      const double z = p_height.z();
+
+      if (x < x_min || x >= x_max || y < y_min || y >= y_max) {
+        continue;
+      }
+      if (z < grid.spec.min_z || z > grid.spec.max_z) {
+        continue;
+      }
+
+      const auto col = static_cast<std::uint32_t>((x - x_min) / grid.spec.resolution);
+      const auto row = static_cast<std::uint32_t>((y - y_min) / grid.spec.resolution);
+      if (col >= width || row >= height) {
+        continue;
+      }
+
+      const auto index = static_cast<std::size_t>(row) * width + col;
+      if (std::isfinite(grid.height[index])) {
+        continue;
+      }
+      registered_cell_samples[index].push_back(static_cast<float>(z));
+    }
+
+    for (std::size_t index = 0; index < registered_cell_samples.size(); ++index) {
+      auto & samples = registered_cell_samples[index];
+      if (
+        std::isfinite(grid.height[index]) ||
+        static_cast<int>(samples.size()) < cloud_registered_fill_min_points_per_cell_)
+      {
+        continue;
+      }
+
+      std::sort(samples.begin(), samples.end());
+      const auto sample_index = std::min(
+        static_cast<std::size_t>(
+          std::round(cloud_registered_fill_percentile_ * static_cast<double>(samples.size() - 1))),
+        samples.size() - 1);
+      grid.height[index] = samples[sample_index];
+      if (index < support_counts.size()) {
+        support_counts[index] = std::max(
+          support_counts[index],
+          static_cast<int>(samples.size()));
+      }
+    }
+  }
+
+  static double localCoverage(const std::size_t observed_cells, const std::size_t total_cells)
+  {
+    if (total_cells == 0) {
+      return 0.0;
+    }
+    return static_cast<double>(observed_cells) / static_cast<double>(total_cells);
+  }
+
+  void fillInitialFloorFromRegisteredCloud(
+    ElevationGrid & grid,
+    const std::vector<int> & support_counts,
+    const std::shared_ptr<const std::vector<MapPoint>> & registered_points,
+    const tf2::Quaternion & q_height_map,
+    const tf2::Vector3 & p_map_target,
+    const double local_coverage) const
+  {
+    if (
+      !cloud_registered_initial_floor_fill_enabled_ ||
+      local_coverage > cloud_registered_initial_floor_max_coverage_ ||
+      !registered_points ||
+      registered_points->empty())
+    {
+      return;
+    }
+
+    float floor_z = std::numeric_limits<float>::quiet_NaN();
+    if (!estimateRegisteredFloorHeight(grid, registered_points, q_height_map, p_map_target, floor_z)) {
+      return;
+    }
+
+    for (std::size_t index = 0; index < grid.height.size(); ++index) {
+      const bool has_enough_current_support =
+        index < support_counts.size() &&
+        support_counts[index] >= cloud_registered_initial_keep_min_support_;
+      if (!has_enough_current_support || !std::isfinite(grid.height[index])) {
+        grid.height[index] = floor_z;
+      }
+    }
+  }
+
+  bool estimateRegisteredFloorHeight(
+    const ElevationGrid & grid,
+    const std::shared_ptr<const std::vector<MapPoint>> & registered_points,
+    const tf2::Quaternion & q_height_map,
+    const tf2::Vector3 & p_map_target,
+    float & floor_z) const
+  {
+    std::vector<float> z_candidates;
+    z_candidates.reserve(registered_points->size());
+
+    const double x_min = grid.spec.xMin();
+    const double x_max = grid.spec.xMax();
+    const double y_min = grid.spec.yMin();
+    const double y_max = grid.spec.yMax();
+
+    for (const auto & point : *registered_points) {
+      const tf2::Vector3 p_height = tf2::quatRotate(
+        q_height_map,
+        tf2::Vector3(point.x, point.y, point.z) - p_map_target);
+      const double x = p_height.x();
+      const double y = p_height.y();
+      const double z = p_height.z();
+
+      if (x < x_min || x >= x_max || y < y_min || y >= y_max) {
+        continue;
+      }
+      if (z < grid.spec.min_z || z > grid.spec.max_z) {
+        continue;
+      }
+      z_candidates.push_back(static_cast<float>(z));
+    }
+
+    if (static_cast<int>(z_candidates.size()) < cloud_registered_floor_min_points_) {
+      return false;
+    }
+
+    std::sort(z_candidates.begin(), z_candidates.end());
+    const auto upper_index = std::min(
+      z_candidates.size() - 1,
+      static_cast<std::size_t>(std::round(0.60 * static_cast<double>(z_candidates.size() - 1))));
+    z_candidates.resize(upper_index + 1);
+    if (static_cast<int>(z_candidates.size()) < cloud_registered_floor_min_points_) {
+      return false;
+    }
+
+    const auto minmax = std::minmax_element(z_candidates.begin(), z_candidates.end());
+    const float min_z = *minmax.first;
+    const float max_z = *minmax.second;
+    const double bin_size = std::max(1.0e-3, cloud_registered_floor_support_band_);
+    const std::size_t bin_count = std::max<std::size_t>(
+      1,
+      static_cast<std::size_t>(std::ceil((max_z - min_z) / bin_size)) + 1);
+    std::vector<int> bins(bin_count, 0);
+    for (const auto z : z_candidates) {
+      const auto bin = std::min(
+        bin_count - 1,
+        static_cast<std::size_t>(std::floor((z - min_z) / bin_size)));
+      ++bins[bin];
+    }
+
+    std::size_t best_bin = 0;
+    int best_count = bins.front();
+    for (std::size_t i = 1; i < bins.size(); ++i) {
+      if (bins[i] > best_count) {
+        best_bin = i;
+        best_count = bins[i];
+      }
+    }
+
+    if (best_count < cloud_registered_floor_min_points_) {
+      const auto fallback_index = std::min(
+        static_cast<std::size_t>(
+          std::round(cloud_registered_fill_percentile_ * static_cast<double>(z_candidates.size() - 1))),
+        z_candidates.size() - 1);
+      floor_z = z_candidates[fallback_index];
+      return std::isfinite(floor_z);
+    }
+
+    const float bin_center = min_z + static_cast<float>(best_bin) * static_cast<float>(bin_size);
+
+    std::vector<float> floor_cluster;
+    floor_cluster.reserve(z_candidates.size());
+    for (const auto z : z_candidates) {
+      if (std::abs(z - bin_center) <= cloud_registered_floor_support_band_) {
+        floor_cluster.push_back(z);
+      }
+    }
+
+    if (static_cast<int>(floor_cluster.size()) >= cloud_registered_floor_min_points_) {
+      floor_z = medianValue(std::move(floor_cluster));
+    } else {
+      floor_z = bin_center;
+    }
+    return std::isfinite(floor_z);
+  }
+
+  void fillRemainingCells(ElevationGrid & grid) const
+  {
+    if (!std::isfinite(fill_remaining_height_)) {
+      return;
+    }
+
+    for (auto & height_value : grid.height) {
+      if (!std::isfinite(height_value)) {
+        height_value = static_cast<float>(fill_remaining_height_);
       }
     }
   }
@@ -1076,12 +1389,21 @@ private:
   std::string raw_imu_topic_{"/livox/imu"};
   std::string point_lio_odom_topic_{"/aft_mapped_to_init"};
   std::string point_lio_map_topic_{"/point_lio/local_map"};
+  std::string point_lio_registered_topic_{"/cloud_registered"};
   std::string odom_output_topic_{"/autonomy_light/odom"};
   std::string height_map_topic_{"/autonomy_light/height_map"};
   std::string heartbeat_topic_{"/autonomy_light/heartbeat"};
   int interpolation_max_passes_{8};
   int interpolation_min_neighbors_{1};
   double fill_remaining_height_{0.0};
+  bool cloud_registered_fill_enabled_{true};
+  double cloud_registered_fill_percentile_{0.15};
+  int cloud_registered_fill_min_points_per_cell_{2};
+  bool cloud_registered_initial_floor_fill_enabled_{true};
+  double cloud_registered_initial_floor_max_coverage_{0.25};
+  int cloud_registered_floor_min_points_{20};
+  double cloud_registered_floor_support_band_{0.08};
+  int cloud_registered_initial_keep_min_support_{3};
   double robust_height_gate_{0.04};
   double intra_cell_min_support_gap_{0.025};
   int intra_cell_min_support_count_{3};
@@ -1116,6 +1438,9 @@ private:
   std::shared_ptr<const std::vector<MapPoint>> latest_map_points_;
   std::string latest_map_frame_;
   bool has_map_{false};
+  std::mutex registered_mutex_;
+  std::shared_ptr<const std::vector<MapPoint>> latest_registered_points_;
+  bool has_registered_cloud_{false};
   std::mutex grid_mutex_;
   ElevationGrid latest_grid_;
   bool has_grid_{false};
@@ -1135,6 +1460,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr registered_sub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr height_map_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr heartbeat_pub_;
