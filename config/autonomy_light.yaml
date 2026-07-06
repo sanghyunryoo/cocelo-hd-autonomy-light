@@ -57,9 +57,9 @@ autonomy_light:
         min_z: 0.0
         max_z: 0.48
       min_z:
-        min_points_per_cell: 2
+        min_points_per_cell: 3
         supported_min_enabled: true
-        support_band: 0.035
+        support_band: 0.04
       cloud_registered_fill:
         enabled: false
         percentile: 0.15
@@ -79,10 +79,10 @@ autonomy_light:
         temporal_alpha: 1.0
       isolated_filter:
         radius: 1
-        min_support_neighbors: 2
-        support_height_diff: 0.025
-        outlier_height_diff: 0.05
-        every_n_frames: 2
+        min_support_neighbors: 3
+        support_height_diff: 0.035
+        outlier_height_diff: 0.04
+        every_n_frames: 1
       hole_fill:
         radius: 1
         min_neighbors: 4
