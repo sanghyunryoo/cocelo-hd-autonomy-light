@@ -3,9 +3,9 @@ autonomy_light:
     # User-facing setup: pose of the MID360 LiDAR frame in the target frame.
     target_frame: "base_link"
     height_map_frame: "base_link_gravity"
-    lidar_frame: "mid360"
-    target_to_lidar_xyz: [0.0, 0.0, 0.30]
-    target_to_lidar_rpy: [0.0, 0.0, 0.0]
+    lidar_frame: "lidar_link"
+    target_to_lidar_xyz: [0.038335, 0.00162081, 0.138986]
+    target_to_lidar_rpy: [3.1416, 0.0, 0.0]
 
     # User-facing setup: robot-centric elevation map geometry.
     elevation_resolution: 0.05
