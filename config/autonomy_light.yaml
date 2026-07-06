@@ -74,7 +74,6 @@ autonomy_light:
         floor_support_band: 0.08
         initial_keep_min_support: 3
       frame_aggregation:
-        carry_missing_from_previous: false
         robust_height_gate: 0.04
         intra_cell_min_support_gap: 0.025
         intra_cell_min_support_count: 3
