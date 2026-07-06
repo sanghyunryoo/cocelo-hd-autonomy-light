@@ -359,7 +359,7 @@ if [[ -n "${LIVOX_CONFIG_PATH}" && "${MODE}" == "real" && "${NO_DRIVERS}" != "tr
     "-r"
     "__node:=livox_lidar_publisher"
     "-p"
-    "xfer_format:=1"
+    "xfer_format:=0"
     "-p"
     "multi_topic:=0"
     "-p"
