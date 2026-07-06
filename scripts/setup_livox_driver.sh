@@ -140,8 +140,11 @@ prepare_vendored_driver() {
     local target
     target="$(readlink "${workspace_driver}")"
     if [[ "${target}" != "${driver_dir}" ]]; then
-      echo "error: ${workspace_driver} points to ${target}, expected ${driver_dir}" >&2
-      exit 1
+      echo "Replacing Livox driver symlink:"
+      echo "  old: ${workspace_driver} -> ${target}"
+      echo "  new: ${workspace_driver} -> ${driver_dir}"
+      rm "${workspace_driver}"
+      ln -s "${driver_dir}" "${workspace_driver}"
     fi
   elif [[ -e "${workspace_driver}" ]]; then
     echo "error: ${workspace_driver} already exists and is not the managed symlink." >&2
