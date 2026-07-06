@@ -30,15 +30,6 @@ autonomy_light:
     external_ros_domain_id: 0
     debug_local_map_ros_domain_id: 0
     debug_local_map_topic: "/point_lio/local_map"
-    map_filter:
-      enabled: true
-      normal_radius: 0.12
-      min_neighbors: 8
-      max_plane_residual: 0.025
-      ground_normal_dot_min: 0.85
-      max_points: 6000
-      debug_filtered_local_map_enabled: true
-      filtered_local_map_topic: "/autonomy_light/filtered_local_map"
     
     # Optional defaults for MID360 + Point-LIO integration.
     livox_interface: "enP8p1s0"
@@ -59,6 +50,10 @@ autonomy_light:
     interpolation_min_neighbors: 3
     fill_remaining_height: 0.0
     algorithm:
+      # robust: existing autonomy-light selector, autonomy_min_z: autonomy MinZElevationBackend style.
+      elevation_backend: "autonomy_min_z"
+      min_z:
+        min_points_per_cell: 1
       cloud_registered_fill:
         enabled: false
         percentile: 0.15

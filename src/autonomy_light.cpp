@@ -13,7 +13,6 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -193,12 +192,13 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "Autonomy light ready: lidar=%s target=%s grid=%ux%u res=%.3fm publish=%.1fHz",
+      "Autonomy light ready: lidar=%s target=%s grid=%ux%u res=%.3fm backend=%s publish=%.1fHz",
       lidar_frame_.c_str(),
       target_frame_.c_str(),
       grid_spec_.width(),
       grid_spec_.height(),
       grid_spec_.resolution,
+      elevation_backend_.c_str(),
       publish_rate_hz_);
   }
 
@@ -217,7 +217,6 @@ public:
     if (output_spin_thread_.joinable()) {
       output_spin_thread_.join();
     }
-    filtered_local_map_pub_.reset();
     debug_local_map_pub_.reset();
     height_map_pub_.reset();
     odom_pub_.reset();
@@ -250,10 +249,6 @@ private:
         "debug_local_map_ros_domain_id", debug_local_map_ros_domain_id_));
     debug_local_map_topic_ = declare_parameter<std::string>(
       "debug_local_map_topic", debug_local_map_topic_);
-    filtered_local_map_debug_enabled_ = declare_parameter<bool>(
-      "map_filter.debug_filtered_local_map_enabled", filtered_local_map_debug_enabled_);
-    filtered_local_map_topic_ = declare_parameter<std::string>(
-      "map_filter.filtered_local_map_topic", filtered_local_map_topic_);
 
     target_to_lidar_xyz_ = declareVectorParameter(
       "target_to_lidar_xyz", target_to_lidar_xyz_, 3);
@@ -289,26 +284,6 @@ private:
         "height_origin.floor_min_points",
         height_origin_floor_min_points_)));
     publish_rate_hz_ = std::max(1.0, declare_parameter<double>("publish_rate_hz", publish_rate_hz_));
-    map_filter_enabled_ = declare_parameter<bool>("map_filter.enabled", map_filter_enabled_);
-    map_filter_normal_radius_ = std::max(
-      1.0e-3,
-      declare_parameter<double>("map_filter.normal_radius", map_filter_normal_radius_));
-    map_filter_min_neighbors_ = std::max(
-      3,
-      static_cast<int>(declare_parameter<int>(
-        "map_filter.min_neighbors", map_filter_min_neighbors_)));
-    map_filter_max_plane_residual_ = std::max(
-      0.0,
-      declare_parameter<double>(
-        "map_filter.max_plane_residual", map_filter_max_plane_residual_));
-    map_filter_ground_normal_dot_min_ = std::clamp(
-      declare_parameter<double>(
-        "map_filter.ground_normal_dot_min", map_filter_ground_normal_dot_min_),
-      0.0,
-      1.0);
-    map_filter_max_points_ = std::max(
-      0,
-      static_cast<int>(declare_parameter<int>("map_filter.max_points", map_filter_max_points_)));
 
     raw_lidar_topic_ = declare_parameter<std::string>("raw_lidar_topic", raw_lidar_topic_);
     raw_lidar_msg_type_ = declare_parameter<std::string>("raw_lidar_msg_type", raw_lidar_msg_type_);
@@ -335,6 +310,12 @@ private:
       1,
       8);
     fill_remaining_height_ = declare_parameter<double>("fill_remaining_height", fill_remaining_height_);
+    elevation_backend_ = declare_parameter<std::string>(
+      "algorithm.elevation_backend", elevation_backend_);
+    min_z_min_points_per_cell_ = std::max(
+      1,
+      static_cast<int>(declare_parameter<int>(
+        "algorithm.min_z.min_points_per_cell", min_z_min_points_per_cell_)));
     cloud_registered_fill_enabled_ = declare_parameter<bool>(
       "algorithm.cloud_registered_fill.enabled", cloud_registered_fill_enabled_);
     cloud_registered_fill_percentile_ = std::clamp(
@@ -595,26 +576,6 @@ private:
         "Debug local map republish enabled: %s on ROS_DOMAIN_ID=%d",
         debug_local_map_topic_.c_str(),
         debug_local_map_ros_domain_id_);
-      if (filtered_local_map_debug_enabled_ && !filtered_local_map_topic_.empty()) {
-        filtered_local_map_pub_ = debug_output_node->create_publisher<sensor_msgs::msg::PointCloud2>(
-          filtered_local_map_topic_,
-          rclcpp::SensorDataQoS());
-        RCLCPP_INFO(
-          get_logger(),
-          "Filtered local map debug enabled: %s on ROS_DOMAIN_ID=%d",
-          filtered_local_map_topic_.c_str(),
-          debug_local_map_ros_domain_id_);
-      }
-    }
-    else if (filtered_local_map_debug_enabled_ && !filtered_local_map_topic_.empty()) {
-      filtered_local_map_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-        filtered_local_map_topic_,
-        rclcpp::SensorDataQoS());
-      RCLCPP_INFO(
-        get_logger(),
-        "Filtered local map debug enabled: %s on ROS_DOMAIN_ID=%d",
-        filtered_local_map_topic_.c_str(),
-        internal_ros_domain_id_);
     }
 
     RCLCPP_INFO(
@@ -860,22 +821,6 @@ private:
       return;
     }
 
-    if (map_filter_enabled_) {
-      const auto raw_count = points->size();
-      points = filterLocalMapByPlaneConsistency(std::move(points));
-      RCLCPP_INFO_THROTTLE(
-        get_logger(),
-        *get_clock(),
-        2000,
-        "Filtered local map: %zu/%zu points kept",
-        points->size(),
-        raw_count);
-    }
-
-    if (filtered_local_map_pub_) {
-      filtered_local_map_pub_->publish(pointsToPointCloud(*points, msg->header));
-    }
-
     {
       std::lock_guard<std::mutex> lock(map_mutex_);
       latest_map_points_ = std::move(points);
@@ -884,184 +829,6 @@ private:
     }
     last_map_time_ = now();
     ++map_count_;
-  }
-
-  std::shared_ptr<std::vector<MapPoint>> filterLocalMapByPlaneConsistency(
-    std::shared_ptr<std::vector<MapPoint>> input) const
-  {
-    if (!input || input->empty()) {
-      return input;
-    }
-
-    const auto & points = *input;
-    const std::size_t stride =
-      map_filter_max_points_ > 0 && points.size() > static_cast<std::size_t>(map_filter_max_points_) ?
-      static_cast<std::size_t>(
-        std::ceil(static_cast<double>(points.size()) / static_cast<double>(map_filter_max_points_))) :
-      1U;
-
-    const double cell_size = map_filter_normal_radius_;
-    const double radius2 = map_filter_normal_radius_ * map_filter_normal_radius_;
-    std::unordered_map<std::uint64_t, std::vector<std::size_t>> cells;
-    cells.reserve(points.size());
-    for (std::size_t i = 0; i < points.size(); ++i) {
-      const int cx = static_cast<int>(std::floor(points[i].x / cell_size));
-      const int cy = static_cast<int>(std::floor(points[i].y / cell_size));
-      cells[cellKey(cx, cy)].push_back(i);
-    }
-
-    auto filtered = std::make_shared<std::vector<MapPoint>>();
-    filtered->reserve(points.size() / stride + 1U);
-    for (std::size_t i = 0; i < points.size(); i += stride) {
-      const auto & center = points[i];
-      const int cx = static_cast<int>(std::floor(center.x / cell_size));
-      const int cy = static_cast<int>(std::floor(center.y / cell_size));
-
-      std::array<double, 6> normal_matrix{};
-      std::array<double, 3> rhs{};
-      double residual_check_sum = 0.0;
-      int count = 0;
-
-      std::vector<std::size_t> neighbors;
-      neighbors.reserve(32);
-      for (int dy = -1; dy <= 1; ++dy) {
-        for (int dx = -1; dx <= 1; ++dx) {
-          const auto found = cells.find(cellKey(cx + dx, cy + dy));
-          if (found == cells.end()) {
-            continue;
-          }
-          for (const auto j : found->second) {
-            const auto & point = points[j];
-            const double x = static_cast<double>(point.x) - center.x;
-            const double y = static_cast<double>(point.y) - center.y;
-            const double dist2 = x * x + y * y;
-            if (dist2 > radius2) {
-              continue;
-            }
-            neighbors.push_back(j);
-            const double z = point.z;
-            normal_matrix[0] += x * x;
-            normal_matrix[1] += x * y;
-            normal_matrix[2] += x;
-            normal_matrix[3] += y * y;
-            normal_matrix[4] += y;
-            normal_matrix[5] += 1.0;
-            rhs[0] += x * z;
-            rhs[1] += y * z;
-            rhs[2] += z;
-            ++count;
-          }
-        }
-      }
-
-      if (count < map_filter_min_neighbors_) {
-        continue;
-      }
-
-      std::array<double, 3> plane{};
-      if (!solveSymmetricPlane(normal_matrix, rhs, plane)) {
-        continue;
-      }
-
-      for (const auto j : neighbors) {
-        const auto & point = points[j];
-        const double x = static_cast<double>(point.x) - center.x;
-        const double y = static_cast<double>(point.y) - center.y;
-        const double expected_z = plane[0] * x + plane[1] * y + plane[2];
-        const double residual = static_cast<double>(point.z) - expected_z;
-        residual_check_sum += residual * residual;
-      }
-
-      const double rms = std::sqrt(residual_check_sum / static_cast<double>(count));
-      const double normal_dot_z = 1.0 / std::sqrt(plane[0] * plane[0] + plane[1] * plane[1] + 1.0);
-      if (
-        rms <= map_filter_max_plane_residual_ &&
-        normal_dot_z >= map_filter_ground_normal_dot_min_)
-      {
-        filtered->push_back(center);
-      }
-    }
-
-    return filtered;
-  }
-
-  static std::uint64_t cellKey(const int x, const int y)
-  {
-    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32U) |
-      static_cast<std::uint32_t>(y);
-  }
-
-  static bool solveSymmetricPlane(
-    const std::array<double, 6> & compact_matrix,
-    const std::array<double, 3> & rhs,
-    std::array<double, 3> & solution)
-  {
-    double a[3][4] = {
-      {compact_matrix[0], compact_matrix[1], compact_matrix[2], rhs[0]},
-      {compact_matrix[1], compact_matrix[3], compact_matrix[4], rhs[1]},
-      {compact_matrix[2], compact_matrix[4], compact_matrix[5], rhs[2]},
-    };
-
-    for (int col = 0; col < 3; ++col) {
-      int pivot = col;
-      for (int row = col + 1; row < 3; ++row) {
-        if (std::abs(a[row][col]) > std::abs(a[pivot][col])) {
-          pivot = row;
-        }
-      }
-      if (std::abs(a[pivot][col]) < 1.0e-9) {
-        return false;
-      }
-      if (pivot != col) {
-        for (int k = col; k < 4; ++k) {
-          std::swap(a[col][k], a[pivot][k]);
-        }
-      }
-      const double scale = a[col][col];
-      for (int k = col; k < 4; ++k) {
-        a[col][k] /= scale;
-      }
-      for (int row = 0; row < 3; ++row) {
-        if (row == col) {
-          continue;
-        }
-        const double factor = a[row][col];
-        for (int k = col; k < 4; ++k) {
-          a[row][k] -= factor * a[col][k];
-        }
-      }
-    }
-
-    solution = {a[0][3], a[1][3], a[2][3]};
-    return true;
-  }
-
-  sensor_msgs::msg::PointCloud2 pointsToPointCloud(
-    const std::vector<MapPoint> & points,
-    const std_msgs::msg::Header & header) const
-  {
-    sensor_msgs::msg::PointCloud2 cloud;
-    cloud.header = header;
-    cloud.height = 1;
-    cloud.is_bigendian = false;
-    cloud.is_dense = true;
-
-    sensor_msgs::PointCloud2Modifier modifier(cloud);
-    modifier.setPointCloud2FieldsByString(1, "xyz");
-    modifier.resize(points.size());
-
-    sensor_msgs::PointCloud2Iterator<float> x_it(cloud, "x");
-    sensor_msgs::PointCloud2Iterator<float> y_it(cloud, "y");
-    sensor_msgs::PointCloud2Iterator<float> z_it(cloud, "z");
-    for (const auto & point : points) {
-      *x_it = point.x;
-      *y_it = point.y;
-      *z_it = point.z;
-      ++x_it;
-      ++y_it;
-      ++z_it;
-    }
-    return cloud;
   }
 
   void onPointLioRegistered(sensor_msgs::msg::PointCloud2::SharedPtr msg)
@@ -1183,7 +950,10 @@ private:
       if (cell_samples[index].empty()) {
         continue;
       }
-      const auto cell = robustCellHeight(cell_samples[index]);
+      const auto cell = selectCellHeight(cell_samples[index]);
+      if (!std::isfinite(cell.height)) {
+        continue;
+      }
       grid.height[index] = cell.height;
       support_counts[index] = cell.support_count;
       ++local_observed_cells;
@@ -1328,6 +1098,34 @@ private:
       std::round(cell_height_percentile_ * static_cast<double>(samples.size() - 1)));
     const auto clamped_index = std::min(percentile_index, samples.size() - 1);
     return {samples[clamped_index], support_count};
+  }
+
+  CellHeight minZCellHeight(const std::vector<float> & samples) const
+  {
+    if (static_cast<int>(samples.size()) < min_z_min_points_per_cell_) {
+      return {};
+    }
+    const auto min_it = std::min_element(samples.begin(), samples.end());
+    if (min_it == samples.end()) {
+      return {};
+    }
+    return {*min_it, static_cast<int>(samples.size())};
+  }
+
+  CellHeight selectCellHeight(std::vector<float> & samples)
+  {
+    if (elevation_backend_ == "autonomy_min_z" || elevation_backend_ == "min_z") {
+      return minZCellHeight(samples);
+    }
+    if (elevation_backend_ != "robust") {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(),
+        *get_clock(),
+        2000,
+        "Unknown algorithm.elevation_backend '%s'; falling back to robust",
+        elevation_backend_.c_str());
+    }
+    return robustCellHeight(samples);
   }
 
   void mergeWithPreviousGrid(ElevationGrid & grid, const std::vector<int> & support_counts)
@@ -1972,8 +1770,6 @@ private:
   int external_ros_domain_id_{-1};
   int debug_local_map_ros_domain_id_{-1};
   std::string debug_local_map_topic_{"/point_lio/local_map"};
-  bool filtered_local_map_debug_enabled_{true};
-  std::string filtered_local_map_topic_{"/autonomy_light/filtered_local_map"};
   std::vector<double> target_to_lidar_xyz_{0.0, 0.0, 0.3};
   std::vector<double> target_to_lidar_rpy_{0.0, 0.0, 0.0};
   tf2::Vector3 target_to_lidar_translation_{0.0, 0.0, 0.3};
@@ -1982,12 +1778,6 @@ private:
 
   GridSpec grid_spec_;
   double publish_rate_hz_{50.0};
-  bool map_filter_enabled_{true};
-  double map_filter_normal_radius_{0.12};
-  int map_filter_min_neighbors_{8};
-  double map_filter_max_plane_residual_{0.025};
-  double map_filter_ground_normal_dot_min_{0.85};
-  int map_filter_max_points_{6000};
   std::string height_origin_mode_{"local_floor"};
   double height_origin_fixed_z_{0.0};
   double height_origin_filter_alpha_{0.25};
@@ -2013,6 +1803,8 @@ private:
   int interpolation_max_passes_{8};
   int interpolation_min_neighbors_{1};
   double fill_remaining_height_{0.0};
+  std::string elevation_backend_{"robust"};
+  int min_z_min_points_per_cell_{1};
   bool cloud_registered_fill_enabled_{true};
   double cloud_registered_fill_percentile_{0.15};
   int cloud_registered_fill_min_points_per_cell_{2};
@@ -2087,7 +1879,6 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr registered_sub_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr filtered_local_map_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_local_map_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr height_map_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
