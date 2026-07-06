@@ -23,7 +23,7 @@
       imu_time_inte: 0.02
       satu_acc: 30.0
       satu_gyro: 35.0
-      acc_norm: 9.81
+      acc_norm: 1.0
       lidar_meas_cov: 0.05
       acc_cov_output: 500.0
       gyr_cov_output: 1000.0
