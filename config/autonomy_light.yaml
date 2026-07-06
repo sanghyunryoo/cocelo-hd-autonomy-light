@@ -24,8 +24,8 @@ autonomy_light:
     point_lio_registered_topic: "/cloud_registered"
     odom_output_topic: "/autonomy_light/odom"
     height_map_topic: "/autonomy_light/height_map"
-    interpolation_max_passes: 8
-    interpolation_min_neighbors: 1
+    interpolation_max_passes: 2
+    interpolation_min_neighbors: 3
     fill_remaining_height: 0.0
     algorithm:
       cloud_registered_fill:
@@ -42,25 +42,25 @@ autonomy_light:
         intra_cell_min_support_gap: 0.025
         intra_cell_min_support_count: 3
         edge_mix_height_diff: 0.035
-        edge_prefer_prev_support_count: 2
+        edge_prefer_prev_support_count: 1
         cell_height_percentile: 0.15
-        temporal_alpha: 0.75
+        temporal_alpha: 1.0
       isolated_filter:
-        radius: 1
+        radius: 0
         min_support_neighbors: 2
         support_height_diff: 0.025
         outlier_height_diff: 0.05
         every_n_frames: 2
       hole_fill:
         radius: 1
-        min_neighbors: 3
-        max_height_diff: 0.02
+        min_neighbors: 4
+        max_height_diff: 0.015
       bilateral:
         radius: 1
         sigma_spatial: 1.1
         sigma_height: 0.015
         max_height_diff: 0.025
-        passes: 1
+        passes: 0
         every_n_frames: 2
     start_lidar_driver: true
     start_point_lio: true
