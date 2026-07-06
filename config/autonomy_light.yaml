@@ -60,6 +60,10 @@ autonomy_light:
         min_points_per_cell: 3
         supported_min_enabled: true
         support_band: 0.04
+        obstacle_override_enabled: true
+        obstacle_min_height: 0.06
+        obstacle_min_points: 2
+        obstacle_support_band: 0.06
       cloud_registered_fill:
         enabled: false
         percentile: 0.15

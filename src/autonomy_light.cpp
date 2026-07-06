@@ -324,6 +324,18 @@ private:
     min_z_support_band_ = std::max(
       0.0,
       declare_parameter<double>("algorithm.min_z.support_band", min_z_support_band_));
+    min_z_obstacle_override_enabled_ = declare_parameter<bool>(
+      "algorithm.min_z.obstacle_override_enabled", min_z_obstacle_override_enabled_);
+    min_z_obstacle_min_height_ = std::max(
+      0.0,
+      declare_parameter<double>("algorithm.min_z.obstacle_min_height", min_z_obstacle_min_height_));
+    min_z_obstacle_min_points_ = std::max(
+      1,
+      static_cast<int>(declare_parameter<int>(
+        "algorithm.min_z.obstacle_min_points", min_z_obstacle_min_points_)));
+    min_z_obstacle_support_band_ = std::max(
+      0.0,
+      declare_parameter<double>("algorithm.min_z.obstacle_support_band", min_z_obstacle_support_band_));
     cloud_registered_fill_enabled_ = declare_parameter<bool>(
       "algorithm.cloud_registered_fill.enabled", cloud_registered_fill_enabled_);
     cloud_registered_fill_percentile_ = std::clamp(
@@ -979,7 +991,7 @@ private:
       local_coverage);
     ++filter_frame_count_;
     applyHeightClipping(grid);
-    applyIsolatedFilter(grid);
+    applyIsolatedFilter(grid, support_counts);
     fillHoles(grid);
     applyBilateralFilter(grid);
     interpolateMissingCells(grid);
@@ -1125,6 +1137,7 @@ private:
     }
 
     std::sort(samples.begin(), samples.end());
+    CellHeight floor_cell;
     for (auto candidate = samples.begin(); candidate != samples.end(); ++candidate) {
       const float support_limit = *candidate + static_cast<float>(min_z_support_band_);
       const auto support_end = std::upper_bound(candidate, samples.end(), support_limit);
@@ -1134,11 +1147,38 @@ private:
         for (auto it = candidate; it != support_end; ++it) {
           sum += *it;
         }
-        return {sum / static_cast<float>(support_count), support_count};
+        floor_cell = {sum / static_cast<float>(support_count), support_count};
+        break;
       }
     }
 
-    return {};
+    if (!std::isfinite(floor_cell.height)) {
+      return {};
+    }
+
+    if (min_z_obstacle_override_enabled_) {
+      for (auto candidate = samples.end(); candidate != samples.begin();) {
+        --candidate;
+        const float support_limit = *candidate - static_cast<float>(min_z_obstacle_support_band_);
+        const auto support_begin = std::lower_bound(samples.begin(), std::next(candidate), support_limit);
+        const int support_count = static_cast<int>(std::distance(support_begin, std::next(candidate)));
+        if (support_count < min_z_obstacle_min_points_) {
+          continue;
+        }
+
+        float sum = 0.0F;
+        for (auto it = support_begin; it != std::next(candidate); ++it) {
+          sum += *it;
+        }
+        const float obstacle_height = sum / static_cast<float>(support_count);
+        if (obstacle_height - floor_cell.height >= static_cast<float>(min_z_obstacle_min_height_)) {
+          return {obstacle_height, support_count};
+        }
+        break;
+      }
+    }
+
+    return floor_cell;
   }
 
   CellHeight selectCellHeight(std::vector<float> & samples)
@@ -1204,7 +1244,7 @@ private:
     }
   }
 
-  void applyIsolatedFilter(ElevationGrid & grid) const
+  void applyIsolatedFilter(ElevationGrid & grid, const std::vector<int> & support_counts) const
   {
     if (
       isolated_filter_radius_ <= 0 ||
@@ -1223,6 +1263,14 @@ private:
         const auto index = static_cast<std::size_t>(row) * width + col;
         const float value = grid.height[index];
         if (!std::isfinite(value)) {
+          continue;
+        }
+        if (
+          min_z_obstacle_override_enabled_ &&
+          value >= static_cast<float>(min_z_obstacle_min_height_) &&
+          index < support_counts.size() &&
+          support_counts[index] >= min_z_obstacle_min_points_)
+        {
           continue;
         }
 
@@ -1854,6 +1902,10 @@ private:
   int min_z_min_points_per_cell_{1};
   bool min_z_supported_min_enabled_{false};
   double min_z_support_band_{0.03};
+  bool min_z_obstacle_override_enabled_{false};
+  double min_z_obstacle_min_height_{0.06};
+  int min_z_obstacle_min_points_{2};
+  double min_z_obstacle_support_band_{0.06};
   bool cloud_registered_fill_enabled_{true};
   double cloud_registered_fill_percentile_{0.15};
   int cloud_registered_fill_min_points_per_cell_{2};
