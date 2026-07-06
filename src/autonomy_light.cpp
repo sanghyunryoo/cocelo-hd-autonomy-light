@@ -229,6 +229,7 @@ private:
 
     raw_lidar_topic_ = declare_parameter<std::string>("raw_lidar_topic", raw_lidar_topic_);
     raw_imu_topic_ = declare_parameter<std::string>("raw_imu_topic", raw_imu_topic_);
+    monitor_raw_lidar_ = declare_parameter<bool>("monitor_raw_lidar", monitor_raw_lidar_);
     point_lio_odom_topic_ = declare_parameter<std::string>(
       "point_lio_odom_topic", point_lio_odom_topic_);
     point_lio_map_topic_ = declare_parameter<std::string>(
@@ -394,12 +395,14 @@ private:
       rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile());
     heartbeat_pub_ = create_publisher<std_msgs::msg::String>(heartbeat_topic_, 10);
 
-    lidar_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-      raw_lidar_topic_,
-      rclcpp::SensorDataQoS(),
-      [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
-        onLidarCloud(std::move(msg));
-      });
+    if (monitor_raw_lidar_) {
+      lidar_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+        raw_lidar_topic_,
+        rclcpp::SensorDataQoS(),
+        [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+          onLidarCloud(std::move(msg));
+        });
+    }
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
       point_lio_odom_topic_,
       rclcpp::QoS(rclcpp::KeepLast(20)).reliable().durability_volatile(),
@@ -412,12 +415,14 @@ private:
       [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
         onPointLioMap(std::move(msg));
       });
-    registered_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-      point_lio_registered_topic_,
-      rclcpp::SensorDataQoS(),
-      [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
-        onPointLioRegistered(std::move(msg));
-      });
+    if (cloud_registered_fill_enabled_) {
+      registered_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+        point_lio_registered_topic_,
+        rclcpp::SensorDataQoS(),
+        [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+          onPointLioRegistered(std::move(msg));
+        });
+    }
 
     const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>(1.0 / publish_rate_hz_));
@@ -514,6 +519,8 @@ private:
       "-p", "preprocess.scan_line:=4",
       "-p", "preprocess.blind:=0.5",
       "-p", "point_filter_num:=1",
+      "-p", "publish.path_en:=false",
+      "-p", "publish.scan_publish_en:=false",
       "-p", "publish.scan_bodyframe_pub_en:=false",
       "-p", "publish.local_map_en:=true",
       "-p", "publish.local_map_topic:=" + point_lio_map_topic_,
@@ -521,6 +528,8 @@ private:
       "-p", "publish.local_map_y_length:=" + shortDouble(pointLioLocalMapYLength()),
       "-p", "publish.local_map_z_length:=" + shortDouble(pointLioLocalMapZLength()),
       "-p", "publish.local_map_every_n_frames:=1",
+      "-p", "pcd_save.pcd_save_en:=false",
+      "-p", "runtime_pos_log_enable:=false",
     };
     if (child_use_sim_time_) {
       command.push_back("-p");
@@ -1351,8 +1360,8 @@ private:
   void publishHeartbeat()
   {
     std_msgs::msg::String msg;
-    const bool lidar_stale = lidar_count_ == 0 ||
-      (now() - last_lidar_time_) > rclcpp::Duration::from_seconds(2.0);
+    const bool lidar_stale = monitor_raw_lidar_ &&
+      (lidar_count_ == 0 || (now() - last_lidar_time_) > rclcpp::Duration::from_seconds(2.0));
     const bool odom_stale = odom_count_ == 0 ||
       (now() - last_odom_time_) > rclcpp::Duration::from_seconds(2.0);
     const bool map_stale = map_count_ == 0 ||
@@ -1365,7 +1374,8 @@ private:
     } else if (map_stale) {
       msg.data = "degraded:waiting_for_point_lio_map";
     } else {
-      msg.data = "ready:lidar=" + std::to_string(lidar_count_) +
+      msg.data = "ready:lidar=" +
+        (monitor_raw_lidar_ ? std::to_string(lidar_count_) : std::string("unmonitored")) +
         ":odom=" + std::to_string(odom_count_) +
         ":map=" + std::to_string(map_count_) +
         ":publish_hz=" + shortDouble(publish_rate_hz_);
@@ -1387,6 +1397,7 @@ private:
   double publish_rate_hz_{50.0};
   std::string raw_lidar_topic_{"/livox/lidar"};
   std::string raw_imu_topic_{"/livox/imu"};
+  bool monitor_raw_lidar_{false};
   std::string point_lio_odom_topic_{"/aft_mapped_to_init"};
   std::string point_lio_map_topic_{"/point_lio/local_map"};
   std::string point_lio_registered_topic_{"/cloud_registered"};

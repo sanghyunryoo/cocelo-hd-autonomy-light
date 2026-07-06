@@ -49,8 +49,8 @@
       publish_odometry_without_downsample: false
 
     publish:
-      path_en: true
-      scan_publish_en: true
+      path_en: false
+      scan_publish_en: false
       scan_bodyframe_pub_en: false
       local_map_en: true
       local_map_topic: "/point_lio/local_map"
