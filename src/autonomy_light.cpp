@@ -372,6 +372,9 @@ private:
       static_cast<int>(declare_parameter<int>(
         "algorithm.cloud_registered_fill.initial_keep_min_support",
         cloud_registered_initial_keep_min_support_)));
+    carry_missing_from_previous_ = declare_parameter<bool>(
+      "algorithm.frame_aggregation.carry_missing_from_previous",
+      carry_missing_from_previous_);
     robust_height_gate_ = declare_parameter<double>(
       "algorithm.frame_aggregation.robust_height_gate", robust_height_gate_);
     intra_cell_min_support_gap_ = declare_parameter<double>(
@@ -1227,7 +1230,9 @@ private:
 
       float & current = grid.height[i];
       if (!std::isfinite(current)) {
-        current = previous;
+        if (carry_missing_from_previous_) {
+          current = previous;
+        }
         continue;
       }
 
@@ -1914,6 +1919,7 @@ private:
   int cloud_registered_floor_min_points_{20};
   double cloud_registered_floor_support_band_{0.08};
   int cloud_registered_initial_keep_min_support_{3};
+  bool carry_missing_from_previous_{true};
   double robust_height_gate_{0.04};
   double intra_cell_min_support_gap_{0.025};
   int intra_cell_min_support_count_{3};
