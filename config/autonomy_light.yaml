@@ -14,6 +14,9 @@ autonomy_light:
     publish_rate_hz: 50.0
 
     # Optional defaults for MID360 + Point-LIO integration.
+    livox_interface: "enP8p1s0"
+    livox_host_ip: "192.168.1.50/24"
+    livox_lidar_ip: "192.168.1.12"
     raw_lidar_topic: "/livox/lidar"
     raw_imu_topic: "/livox/imu"
     point_lio_odom_topic: "/aft_mapped_to_init"
