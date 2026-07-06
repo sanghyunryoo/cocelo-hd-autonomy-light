@@ -50,6 +50,15 @@ extern bool local_map_pub_en;
 extern std::string local_map_topic;
 extern double local_map_x_length, local_map_y_length, local_map_z_length;
 extern int local_map_publish_every_n_frames;
+extern bool map_update_floor_gate_en;
+extern double map_update_floor_gate_radius;
+extern double map_update_floor_gate_percentile;
+extern int map_update_floor_gate_min_points;
+extern double map_update_floor_gate_max_jump;
+extern double map_update_floor_gate_stable_band;
+extern int map_update_floor_gate_stable_frames;
+extern int map_update_floor_gate_skip_frames_after_jump;
+extern bool map_update_floor_gate_reset_map_after_jump;
 extern shared_ptr<Preprocess> p_pre;
 extern double time_lag_imu_to_lidar;
 

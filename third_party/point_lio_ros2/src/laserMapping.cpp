@@ -449,6 +449,141 @@ bool sync_packages(MeasureGroup &meas) {
 
 int process_increments = 0;
 
+void rebuild_incremental_map_after_floor_jump() {
+    PointVector new_map_points;
+    if (feats_down_world != nullptr) {
+        new_map_points = feats_down_world->points;
+    }
+    ikdtree.Build(new_map_points);
+    PointVector().swap(ikdtree.PCL_Storage);
+    cub_needrm.clear();
+    for (auto &points : Nearest_Points) {
+        points.clear();
+    }
+    RCLCPP_WARN(
+        logger,
+        "Point-LIO ikd-tree map rebuilt after floor-height transition: points=%zu",
+        new_map_points.size());
+}
+
+bool estimate_current_floor_z(double &floor_z) {
+    if (!map_update_floor_gate_en || feats_down_world == nullptr || feats_down_world->empty()) {
+        return false;
+    }
+
+    V3D center;
+    if (use_imu_as_input) {
+        center = kf_input.x_.pos + kf_input.x_.rot.normalized() * Lidar_T_wrt_IMU;
+    } else {
+        center = kf_output.x_.pos + kf_output.x_.rot.normalized() * Lidar_T_wrt_IMU;
+    }
+
+    const double radius = std::max(0.05, map_update_floor_gate_radius);
+    const double radius2 = radius * radius;
+    vector<float> z_candidates;
+    z_candidates.reserve(feats_down_world->size());
+    for (const auto &point : feats_down_world->points) {
+        if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
+            continue;
+        }
+        const double dx = static_cast<double>(point.x) - center(0);
+        const double dy = static_cast<double>(point.y) - center(1);
+        if (dx * dx + dy * dy > radius2) {
+            continue;
+        }
+        z_candidates.push_back(point.z);
+    }
+
+    if (static_cast<int>(z_candidates.size()) < std::max(1, map_update_floor_gate_min_points)) {
+        return false;
+    }
+
+    std::sort(z_candidates.begin(), z_candidates.end());
+    const double percentile = std::clamp(map_update_floor_gate_percentile, 0.0, 1.0);
+    const auto index = std::min(
+        static_cast<std::size_t>(std::round(percentile * static_cast<double>(z_candidates.size() - 1))),
+        z_candidates.size() - 1);
+    floor_z = z_candidates[index];
+    return std::isfinite(floor_z);
+}
+
+bool allow_map_incremental_by_floor_gate() {
+    if (!map_update_floor_gate_en) {
+        return true;
+    }
+
+    static bool initialized = false;
+    static double stable_floor_z = 0.0;
+    static double last_floor_z = 0.0;
+    static int stable_count = 0;
+    static int skip_frames = 0;
+    static bool reset_pending = false;
+    static rclcpp::Clock throttle_clock(RCL_SYSTEM_TIME);
+
+    double current_floor_z = 0.0;
+    if (!estimate_current_floor_z(current_floor_z)) {
+        if (skip_frames > 0) {
+            --skip_frames;
+            return false;
+        }
+        return true;
+    }
+
+    if (!initialized) {
+        initialized = true;
+        stable_floor_z = current_floor_z;
+        last_floor_z = current_floor_z;
+        stable_count = 1;
+        return true;
+    }
+
+    const double jump = std::abs(current_floor_z - stable_floor_z);
+    const double step = std::abs(current_floor_z - last_floor_z);
+    last_floor_z = current_floor_z;
+
+    if (jump > map_update_floor_gate_max_jump || step > map_update_floor_gate_max_jump) {
+        skip_frames = std::max(skip_frames, std::max(1, map_update_floor_gate_skip_frames_after_jump));
+        stable_count = 0;
+        reset_pending = map_update_floor_gate_reset_map_after_jump;
+        RCLCPP_WARN_THROTTLE(
+            logger,
+            throttle_clock,
+            1000,
+            "Map update gated: local floor jump current=%.3f stable=%.3f jump=%.3f step=%.3f skip=%d",
+            current_floor_z,
+            stable_floor_z,
+            jump,
+            step,
+            skip_frames);
+        return false;
+    }
+
+    if (std::abs(current_floor_z - stable_floor_z) <= map_update_floor_gate_stable_band) {
+        stable_count = std::min(stable_count + 1, std::max(1, map_update_floor_gate_stable_frames));
+    } else {
+        stable_count = 0;
+    }
+
+    if (skip_frames > 0) {
+        --skip_frames;
+        if (stable_count < std::max(1, map_update_floor_gate_stable_frames)) {
+            return false;
+        }
+    }
+
+    if (reset_pending && stable_count >= std::max(1, map_update_floor_gate_stable_frames)) {
+        rebuild_incremental_map_after_floor_jump();
+        reset_pending = false;
+        stable_floor_z = current_floor_z;
+        last_floor_z = current_floor_z;
+        return false;
+    }
+
+    const double alpha = 0.2;
+    stable_floor_z = alpha * current_floor_z + (1.0 - alpha) * stable_floor_z;
+    return true;
+}
+
 void map_incremental() {
     PointVector PointToAdd;
     PointVector PointNoNeedDownsample;
@@ -1338,8 +1473,12 @@ int main(int argc, char **argv) {
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
 
-            if (feats_down_size > 4) {
-                map_incremental();
+            if (feats_down_size > 4 && allow_map_incremental_by_floor_gate()) {
+                if (ikdtree.Root_Node == nullptr) {
+                    ikdtree.Build(feats_down_world->points);
+                } else {
+                    map_incremental();
+                }
             }
 
             t5 = omp_get_wtime();

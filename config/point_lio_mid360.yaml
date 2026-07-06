@@ -8,7 +8,7 @@
       con_frame_num: 1
       cut_frame: false
       cut_frame_time_interval: 0.1
-      time_lag_imu_to_lidar: 0.001792
+      time_lag_imu_to_lidar: 0.0
 
     preprocess:
       lidar_type: 1
@@ -45,6 +45,16 @@
       extrinsic_R: [1.0, 0.0, 0.0,
                     0.0, 1.0, 0.0,
                     0.0, 0.0, 1.0]
+      map_update_floor_gate:
+        enabled: true
+        radius: 0.6
+        percentile: 0.20
+        min_points: 30
+        max_jump: 0.08
+        stable_band: 0.03
+        stable_frames: 8
+        skip_frames_after_jump: 12
+        reset_map_after_jump: true
 
     odometry:
       publish_odometry_without_downsample: false
