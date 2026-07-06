@@ -18,7 +18,7 @@ autonomy_light:
     # internal domain to keep local_map private, or to the external domain to view it there.
     internal_ros_domain_id: 42
     external_ros_domain_id: 0
-    debug_local_map_ros_domain_id: 42
+    debug_local_map_ros_domain_id: 0
     debug_local_map_topic: "/point_lio/local_map"
 
     # Optional defaults for MID360 + Point-LIO integration.

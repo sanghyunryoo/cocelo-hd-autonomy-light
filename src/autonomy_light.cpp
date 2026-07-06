@@ -25,6 +25,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/executors/single_threaded_executor.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -203,6 +204,18 @@ public:
   ~AutonomyLightNode() override
   {
     child_processes_.stopAll();
+    if (debug_executor_) {
+      debug_executor_->cancel();
+    }
+    if (output_executor_) {
+      output_executor_->cancel();
+    }
+    if (debug_spin_thread_.joinable()) {
+      debug_spin_thread_.join();
+    }
+    if (output_spin_thread_.joinable()) {
+      output_spin_thread_.join();
+    }
     debug_local_map_pub_.reset();
     height_map_pub_.reset();
     odom_pub_.reset();
@@ -444,6 +457,30 @@ private:
     return std::make_shared<rclcpp::Node>(name, options);
   }
 
+  void startAuxiliaryExecutor(
+    const rclcpp::Node::SharedPtr & node,
+    std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> & executor,
+    std::thread & spin_thread,
+    const std::string & label)
+  {
+    rclcpp::ExecutorOptions options;
+    options.context = node->get_node_base_interface()->get_context();
+    executor = std::make_shared<rclcpp::executors::SingleThreadedExecutor>(options);
+    executor->add_node(node);
+    spin_thread = std::thread(
+      [this, executor, label]() {
+        try {
+          executor->spin();
+        } catch (const std::exception & ex) {
+          RCLCPP_WARN(
+            get_logger(),
+            "%s executor stopped: %s",
+            label.c_str(),
+            ex.what());
+        }
+      });
+  }
+
   void configureDomainOutputs()
   {
     const auto actual_internal_domain =
@@ -464,6 +501,11 @@ private:
         "autonomy_light_external_output",
         external_ros_domain_id_,
         output_context_);
+      startAuxiliaryExecutor(
+        output_node_,
+        output_executor_,
+        output_spin_thread_,
+        "external output");
       output_node = output_node_.get();
     }
 
@@ -482,13 +524,29 @@ private:
       std::make_shared<tf2_ros::TransformBroadcaster>(output_node);
 
     if (debug_local_map_ros_domain_id_ != internal_ros_domain_id_) {
-      debug_node_ = createDomainNode(
-        "autonomy_light_debug_local_map",
-        debug_local_map_ros_domain_id_,
-        debug_context_);
-      debug_local_map_pub_ = debug_node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+      rclcpp::Node * debug_output_node = nullptr;
+      if (debug_local_map_ros_domain_id_ == external_ros_domain_id_) {
+        debug_output_node = output_node;
+      } else {
+        debug_node_ = createDomainNode(
+          "autonomy_light_debug_local_map",
+          debug_local_map_ros_domain_id_,
+          debug_context_);
+        startAuxiliaryExecutor(
+          debug_node_,
+          debug_executor_,
+          debug_spin_thread_,
+          "debug local map");
+        debug_output_node = debug_node_.get();
+      }
+      debug_local_map_pub_ = debug_output_node->create_publisher<sensor_msgs::msg::PointCloud2>(
         debug_local_map_topic_,
         rclcpp::SensorDataQoS());
+      RCLCPP_INFO(
+        get_logger(),
+        "Debug local map republish enabled: %s on ROS_DOMAIN_ID=%d",
+        debug_local_map_topic_.c_str(),
+        debug_local_map_ros_domain_id_);
     }
 
     RCLCPP_INFO(
@@ -1607,6 +1665,10 @@ private:
   rclcpp::Node::SharedPtr output_node_;
   rclcpp::Context::SharedPtr debug_context_;
   rclcpp::Node::SharedPtr debug_node_;
+  std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> output_executor_;
+  std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> debug_executor_;
+  std::thread output_spin_thread_;
+  std::thread debug_spin_thread_;
   std::shared_ptr<tf2_ros::StaticTransformBroadcaster> output_static_tf_broadcaster_;
   std::shared_ptr<tf2_ros::TransformBroadcaster> output_tf_broadcaster_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub_;
