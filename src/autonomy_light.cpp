@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <autonomy_light/msg/height_map.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -219,6 +220,7 @@ public:
     }
     debug_local_map_pub_.reset();
     height_map_pub_.reset();
+    height_map_msg_pub_.reset();
     odom_pub_.reset();
     path_pub_.reset();
     output_static_tf_broadcaster_.reset();
@@ -299,6 +301,8 @@ private:
       "point_lio_registered_topic", point_lio_registered_topic_);
     odom_output_topic_ = declare_parameter<std::string>("odom_output_topic", odom_output_topic_);
     height_map_topic_ = declare_parameter<std::string>("height_map_topic", height_map_topic_);
+    height_map_msg_topic_ = declare_parameter<std::string>(
+      "height_map_msg_topic", height_map_msg_topic_);
     path_output_topic_ = declare_parameter<std::string>("path_output_topic", path_output_topic_);
     heartbeat_topic_ = declare_parameter<std::string>("heartbeat_topic", heartbeat_topic_);
     interpolation_max_passes_ = std::max(
@@ -560,6 +564,9 @@ private:
 
     height_map_pub_ = output_node->create_publisher<sensor_msgs::msg::PointCloud2>(
       height_map_topic_,
+      rclcpp::QoS(rclcpp::KeepLast(2)).reliable().durability_volatile());
+    height_map_msg_pub_ = output_node->create_publisher<::autonomy_light::msg::HeightMap>(
+      height_map_msg_topic_,
       rclcpp::QoS(rclcpp::KeepLast(2)).reliable().durability_volatile());
     odom_pub_ = output_node->create_publisher<nav_msgs::msg::Odometry>(
       odom_output_topic_,
@@ -1766,6 +1773,7 @@ private:
         has_grid_ = true;
       }
       height_map_pub_->publish(gridToPointCloud(grid));
+      height_map_msg_pub_->publish(gridToHeightMapMsg(grid));
     }
 
     nav_msgs::msg::Odometry odom;
@@ -1826,6 +1834,39 @@ private:
     }
 
     return cloud;
+  }
+
+  ::autonomy_light::msg::HeightMap gridToHeightMapMsg(const ElevationGrid & grid) const
+  {
+    ::autonomy_light::msg::HeightMap msg;
+    msg.resolution = static_cast<float>(grid.spec.resolution);
+    msg.x_length = static_cast<float>(grid.spec.x_length);
+    msg.y_length = static_cast<float>(grid.spec.y_length);
+
+    const auto count = static_cast<std::size_t>(grid.spec.width()) * grid.spec.height();
+    msg.data.assign(count, 0.0F);
+
+    const double z_min = clipping_enabled_ ?
+      std::min(clipping_min_z_, clipping_max_z_) :
+      grid.spec.min_z;
+    const double z_max = clipping_enabled_ ?
+      std::max(clipping_min_z_, clipping_max_z_) :
+      grid.spec.max_z;
+    const float base_height = static_cast<float>(std::max(0.0, z_max));
+
+    for (std::size_t index = 0; index < count && index < grid.height.size(); ++index) {
+      const float z = grid.height[index];
+      if (!std::isfinite(z)) {
+        msg.data[index] = base_height;
+        continue;
+      }
+
+      const float z_clamped = static_cast<float>(
+        std::clamp(static_cast<double>(z), z_min, z_max));
+      msg.data[index] = std::clamp(base_height - z_clamped, 0.0F, base_height);
+    }
+
+    return msg;
   }
 
   void publishHeartbeat()
@@ -1890,6 +1931,7 @@ private:
   std::string point_lio_registered_topic_{"/cloud_registered"};
   std::string odom_output_topic_{"/autonomy_light/odom"};
   std::string height_map_topic_{"/autonomy_light/height_map"};
+  std::string height_map_msg_topic_{"/autonomy_light/height_map_data"};
   std::string path_output_topic_{"/path"};
   std::string heartbeat_topic_{"/autonomy_light/heartbeat"};
   int interpolation_max_passes_{8};
@@ -1982,6 +2024,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr registered_sub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_local_map_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr height_map_pub_;
+  rclcpp::Publisher<::autonomy_light::msg::HeightMap>::SharedPtr height_map_msg_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr heartbeat_pub_;

@@ -6,7 +6,7 @@ usage() {
 Usage:
   build.sh [options]
 
-Build autonomy-light and its vendored Livox ROS Driver2.
+Build autonomy-light, its ROS interfaces, and its vendored Livox ROS Driver2.
 
 Options:
   --skip-apt          Do not install Ubuntu/ROS dependencies.

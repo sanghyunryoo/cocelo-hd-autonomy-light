@@ -13,6 +13,7 @@ find_package(nav_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
@@ -23,16 +24,26 @@ find_package(Eigen3 REQUIRED)
 find_package(PythonLibs REQUIRED)
 find_package(OpenMP QUIET)
 
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/HeightMap.msg"
+)
+
+ament_export_dependencies(rosidl_default_runtime)
+
 if(OPENMP_FOUND)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
 endif()
 
-add_executable(autonomy_light
+add_executable(autonomy_light_node
   src/autonomy_light.cpp
 )
 
-ament_target_dependencies(autonomy_light
+set_target_properties(autonomy_light_node
+  PROPERTIES OUTPUT_NAME autonomy_light
+)
+
+ament_target_dependencies(autonomy_light_node
   ament_index_cpp
   geometry_msgs
   livox_ros_driver2
@@ -44,6 +55,12 @@ ament_target_dependencies(autonomy_light
   tf2_geometry_msgs
   tf2_ros
 )
+
+rosidl_get_typesupport_target(cpp_typesupport_target
+  ${PROJECT_NAME}
+  "rosidl_typesupport_cpp"
+)
+target_link_libraries(autonomy_light_node "${cpp_typesupport_target}")
 
 set(POINT_LIO_VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/point_lio_ros2")
 add_executable(autonomy_light_pointlio_mapping
@@ -91,7 +108,7 @@ target_link_libraries(autonomy_light_pointlio_mapping
 )
 
 install(TARGETS
-  autonomy_light
+  autonomy_light_node
   autonomy_light_pointlio_mapping
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )

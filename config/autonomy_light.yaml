@@ -45,6 +45,7 @@ autonomy_light:
     point_lio_registered_topic: "/cloud_registered"
     odom_output_topic: "/autonomy_light/odom"
     height_map_topic: "/autonomy_light/height_map"
+    height_map_msg_topic: "/autonomy_light/height_map_data"
     path_output_topic: "/path"
     interpolation_max_passes: 2
     interpolation_min_neighbors: 3

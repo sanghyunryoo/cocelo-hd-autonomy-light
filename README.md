@@ -1,6 +1,13 @@
 # cocelo-hd-autonomy-light
 
-## Jetson Livox setup
+Lightweight Jetson runtime for MID360 + Point-LIO based robot-centric height
+map publishing.
+
+The package is intended to run on the perception Jetson. Heavy LiDAR and
+mapping topics stay on the internal ROS 2 domain, while control-facing outputs
+are republished on the external ROS 2 domain for the control SBC.
+
+## Quick Setup
 
 This repository vendors `livox_ros_driver2` under `third_party/livox_ros_driver2`.
 On a new Jetson, prepare the Livox SDK, link the vendored driver into the ROS
@@ -30,3 +37,110 @@ source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
 ./launch.sh --real
 ```
+
+## ROS 2 Domains
+
+Default domain split:
+
+```yaml
+internal_ros_domain_id: 42
+external_ros_domain_id: 0
+debug_local_map_ros_domain_id: 42
+```
+
+- Internal domain `42`: Livox driver, Point-LIO, odometry input, local map input,
+  and debug local map.
+- External domain `0`: control-facing outputs only.
+- Keep `debug_local_map_ros_domain_id` equal to the internal domain unless you
+  intentionally want `/point_lio/local_map` on the control network.
+
+Check the external control output:
+
+```bash
+ROS_DOMAIN_ID=0 ros2 topic list | grep autonomy_light
+```
+
+## Control-Facing Outputs
+
+These topics are published on `external_ros_domain_id`.
+
+| Topic | Type | Purpose |
+|---|---|---|
+| `/autonomy_light/height_map_data` | `autonomy_light/msg/HeightMap` | Compact sim-to-real height map for control. |
+| `/autonomy_light/height_map` | `sensor_msgs/msg/PointCloud2` | Debug point cloud generated from the height grid. |
+| `/autonomy_light/odom` | `nav_msgs/msg/Odometry` | Point-LIO odometry remapped to the configured target frame. |
+| `/path` | `nav_msgs/msg/Path` | Point-LIO path republished for consumers that need it. |
+| `/tf`, `/tf_static` | `tf2_msgs` | `odom -> base_link`, `odom -> base_link_gravity`, and static LiDAR transform. |
+
+The custom height map message is:
+
+```ros
+float32[] data
+float32 resolution
+float32 x_length
+float32 y_length
+```
+
+`data` is row-major and matches the autonomy DDS `HeightMap.idl` float-array
+contract:
+
+```text
+index = row * width + col
+width = ceil(x_length / resolution)
+height = ceil(y_length / resolution)
+row: y_min -> y_max
+col: x_min -> x_max
+```
+
+The value is published in Isaac/autonomy height-scanner style:
+
+```text
+data[index] = base_height - grid_z
+```
+
+With the default `clipping.max_z: 0.48`, flat ground is near `0.48` and
+obstacles produce smaller distance values.
+
+The receiving SBC must have this package built and sourced so the custom
+message type is available:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+ROS_DOMAIN_ID=0 ros2 interface show autonomy_light/msg/HeightMap
+ROS_DOMAIN_ID=0 ros2 topic echo /autonomy_light/height_map_data
+```
+
+## Internal Inputs
+
+These topics normally stay on `internal_ros_domain_id`.
+
+| Topic | Type | Producer | Purpose |
+|---|---|---|---|
+| `/livox/lidar` | `livox_ros_driver2/msg/CustomMsg` | Livox ROS Driver2 | MID360 raw LiDAR input to Point-LIO. |
+| `/livox/imu` | `sensor_msgs/msg/Imu` | Livox ROS Driver2 | MID360 internal IMU input to Point-LIO. |
+| `/aft_mapped_to_init` | `nav_msgs/msg/Odometry` | Point-LIO | Mapping odometry consumed by autonomy-light. |
+| `/point_lio/local_map` | `sensor_msgs/msg/PointCloud2` | Point-LIO | Local map sampled into the control height map. |
+| `/cloud_registered` | `sensor_msgs/msg/PointCloud2` | Point-LIO | Optional fill source when `cloud_registered_fill.enabled` is true. |
+
+## Key Parameters
+
+Commonly changed parameters in `config/autonomy_light.yaml`:
+
+| Parameter | Default | Meaning |
+|---|---:|---|
+| `target_frame` | `base_link` | Robot control frame. |
+| `height_map_frame` | `base_link_gravity` | Yaw-only gravity-aligned frame used by the height map. |
+| `elevation_resolution` | `0.05` | Height grid cell size in meters. |
+| `elevation_x_length` / `elevation_y_length` | `1.2` / `1.2` | Robot-centric grid size in meters. |
+| `publish_rate_hz` | `50.0` | External output publish rate. |
+| `algorithm.elevation_backend` | `autonomy_min_z` | Cell selector matching the autonomy min-z style. |
+| `algorithm.clipping.min_z` / `max_z` | `0.0` / `0.48` | Output height clamp range. |
+| `algorithm.min_z.min_points_per_cell` | `3` | Minimum point support for a cell. |
+| `algorithm.min_z.obstacle_override_enabled` | `true` | Allows supported obstacle clusters to override floor min-z. |
+| `algorithm.isolated_filter.*` | see config | Removes isolated random cell noise. |
+
+Full input/output and tuning documentation:
+
+- `docs/autonomy_light_interface_spec.pdf`
+- `docs/autonomy_light_tuning_spec.pdf`
