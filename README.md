@@ -38,6 +38,56 @@ source ~/ros2_ws/install/setup.bash
 ./launch.sh --real
 ```
 
+## Debian Runtime Package
+
+For delivery to another Jetson, build a runtime `.deb` instead of handing over
+the source tree:
+
+```bash
+cd ~/ros2_ws/src/cocelo-hd-autonomy-light
+./scripts/package_deb.sh
+```
+
+On Jetson this creates an `arm64` package under `dist/`, for example:
+
+```text
+dist/cocelo-autonomy-light_0.1.0-1_arm64.deb
+```
+
+Install and run on the target Jetson:
+
+```bash
+sudo apt update
+sudo apt install ./cocelo-autonomy-light_0.1.0-1_arm64.deb
+sudo nano /etc/cocelo/autonomy-light/autonomy_light.yaml
+sudo autonomy-light --real
+```
+
+The package installs the binary runtime under `/opt/cocelo/autonomy-light`, the
+editable runtime config under `/etc/cocelo/autonomy-light/autonomy_light.yaml`,
+and receiver documentation/examples under `/usr/share/doc/cocelo-autonomy-light`.
+The target Jetson is assumed to already have ROS 2 Humble installed under
+`/opt/ros/humble`. The `.deb` bundles autonomy-light-specific runtime artifacts:
+the autonomy-light binaries, generated `HeightMap` message interface, vendored
+Livox ROS driver2 install tree, Point-LIO runtime, docs, examples, and the
+Livox-SDK2 shared library when it is present at build time.
+
+Basic checks:
+
+```bash
+autonomy-light-doctor
+ROS_DOMAIN_ID=0 autonomy-light-heightmap-example
+```
+
+Any ROS 2 host that subscribes to `autonomy_light/msg/HeightMap` must have this
+package installed and sourced, or must build an equivalent message interface:
+
+```bash
+source /opt/ros/humble/setup.bash
+source /opt/cocelo/autonomy-light/install/setup.bash
+ROS_DOMAIN_ID=0 ros2 interface show autonomy_light/msg/HeightMap
+```
+
 ## ROS 2 Domains
 
 Default domain split:
@@ -102,13 +152,23 @@ With the default `clipping.max_z: 0.48`, flat ground is near `0.48` and
 obstacles produce smaller distance values.
 
 The receiving SBC must have this package built and sourced so the custom
-message type is available:
+message type is available. When using the `.deb`, source the packaged install
+tree:
 
 ```bash
 source /opt/ros/humble/setup.bash
-source ~/ros2_ws/install/setup.bash
+source /opt/cocelo/autonomy-light/install/setup.bash
 ROS_DOMAIN_ID=0 ros2 interface show autonomy_light/msg/HeightMap
 ROS_DOMAIN_ID=0 ros2 topic echo /autonomy_light/height_map_data
+```
+
+Recommended receiver QoS for `/autonomy_light/height_map_data`:
+
+```text
+Reliability: Reliable
+Durability: Volatile
+History: KeepLast
+Depth: 2
 ```
 
 ## Internal Inputs
@@ -142,5 +202,5 @@ Commonly changed parameters in `config/autonomy_light.yaml`:
 
 Full input/output and tuning documentation:
 
-- `docs/autonomy_light_interface_spec.pdf`
-- `docs/autonomy_light_tuning_spec.pdf`
+- `docs/autonomy_light_interface_spec.md`
+- `docs/autonomy_light_tuning_spec.md`

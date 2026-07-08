@@ -1,24 +1,66 @@
-# autonomy-light 전달 명세서
+# autonomy-light 사용자 명세서
 
-작성일: 2026-07-08  
-대상 패키지: `autonomy_light`  
-대상 실행 환경: Jetson + ROS 2 Humble + Livox MID360 + Point-LIO  
-주요 수신자: 제어용 SBC 또는 같은 PC의 제어 프로세스
+이 문서는 `cocelo-autonomy-light`를 설치해서 실행하고, 제어 프로그램에서 출력 데이터를 받기 위해 필요한 정보만 정리한다. 내부 SLAM 구조나 구현 세부사항을 몰라도 사용할 수 있도록 작성했다.
 
-## 1. 목적
+## 1. 사전 준비
 
-`autonomy-light`는 Jetson에서 LiDAR 기반 SLAM과 local map 처리를 수행하고, 제어용 SBC가 바로 사용할 수 있는 compact height map과 odometry를 외부 ROS 2 domain으로 내보내는 경량 perception runtime이다.
+대상 Jetson에는 아래가 이미 설치되어 있다고 가정한다.
 
-핵심 목표는 다음과 같다.
+- Ubuntu/JetPack
+- ROS 2 Humble: `/opt/ros/humble`
+- 기본 명령: `bash`, `sudo`, `iproute2`, `python3`
 
-1. MID360 raw LiDAR, IMU, Point-LIO, local map은 내부 domain에 둔다.
-2. 제어용 SBC에는 필요한 출력만 보낸다.
-3. sim-to-real이 가능하도록 autonomy의 DDS `HeightMap.idl`과 같은 float-array 순서를 유지한다.
-4. ROS 2 custom message에 resolution, x/y length metadata를 포함한다.
+전달받는 파일:
 
-## 2. ROS 2 Domain 구조
+```text
+cocelo-autonomy-light_<version>_arm64.deb
+```
 
-기본 설정:
+이 `.deb`에는 autonomy-light 실행 파일, custom `HeightMap` 메시지, Livox driver runtime, Point-LIO runtime, 기본 config, 문서, 예제 subscriber가 포함된다. ROS 2 Humble 자체는 포함하지 않는다.
+
+## 2. 설치
+
+```bash
+sudo apt install ./cocelo-autonomy-light_0.1.0-1_arm64.deb
+```
+
+설치 후 주요 경로:
+
+| 경로 | 용도 |
+|---|---|
+| `/etc/cocelo/autonomy-light/autonomy_light.yaml` | 현장 설정 파일 |
+| `/usr/bin/autonomy-light` | 실행 명령 |
+| `/usr/bin/autonomy-light-doctor` | 설치 및 ROS topic 점검 |
+| `/usr/bin/autonomy-light-heightmap-example` | HeightMap 수신 예제 |
+| `/opt/cocelo/autonomy-light/install` | 패키지 runtime install tree |
+| `/usr/share/doc/cocelo-autonomy-light` | 문서와 예제 코드 |
+
+## 3. 설정
+
+실행 전 설정 파일을 확인한다.
+
+```bash
+sudo nano /etc/cocelo/autonomy-light/autonomy_light.yaml
+```
+
+현장에서 주로 바꾸는 값:
+
+| 항목 | 기본값 | 설명 |
+|---|---:|---|
+| `livox_interface` | `enP8p1s0` | MID360이 연결된 Jetson 유선 NIC |
+| `livox_host_ip` | `192.168.1.50/24` | Jetson의 LiDAR 통신용 고정 IP |
+| `livox_lidar_ip` | `192.168.1.166` | MID360 장치 IP |
+| `internal_ros_domain_id` | `42` | LiDAR/SLAM 내부 ROS 2 domain |
+| `external_ros_domain_id` | `0` | 제어 프로그램이 받을 ROS 2 domain |
+| `debug_local_map_ros_domain_id` | `42` | debug local map 출력 domain |
+| `target_frame` | `base_link` | 제어 기준 frame |
+| `lidar_frame` | `lidar_link` | LiDAR frame |
+| `elevation_resolution` | `0.05` | height map cell 크기, meter |
+| `elevation_x_length` | `1.2` | height map x 길이, meter |
+| `elevation_y_length` | `1.2` | height map y 길이, meter |
+| `publish_rate_hz` | `50.0` | 외부 출력 주기 |
+
+권장 domain 구성:
 
 ```yaml
 internal_ros_domain_id: 42
@@ -26,60 +68,15 @@ external_ros_domain_id: 0
 debug_local_map_ros_domain_id: 42
 ```
 
-### Internal Domain
+`/point_lio/local_map`, `/livox/lidar`, `/livox/imu` 같은 큰 데이터는 내부 domain에만 남기는 것을 권장한다. 이 topic들이 제어용 ROS domain에 보이면 네트워크와 DDS buffer에 부담을 줄 수 있다.
 
-내부 domain은 LiDAR, Point-LIO, local map 처리를 위한 domain이다. 기본값은 `42`이다.
-
-포함되는 주요 topic:
-
-- `/livox/lidar`
-- `/livox/imu`
-- `/aft_mapped_to_init`
-- `/point_lio/local_map`
-- `/cloud_registered`
-- `/autonomy_light/heartbeat`
-
-### External Domain
-
-외부 domain은 제어용 SBC가 보는 domain이다. 기본값은 `0`이다.
-
-포함되는 주요 topic:
-
-- `/autonomy_light/height_map_data`
-- `/autonomy_light/height_map`
-- `/autonomy_light/odom`
-- `/path`
-- `/tf`
-- `/tf_static`
-
-### Debug Local Map
-
-`debug_local_map_ros_domain_id`가 `external_ros_domain_id`와 같으면 `/point_lio/local_map`이 제어망으로 흘러가서 제어용 SBC가 느려질 수 있다. 실기체 기본은 내부 domain과 같은 `42`를 권장한다.
-
-## 3. 실행
-
-Jetson에서 빌드:
+## 4. 실행
 
 ```bash
-cd ~/ros2_ws/src/cocelo-hd-autonomy-light
-./build.sh
+sudo autonomy-light --real
 ```
 
-Livox SDK가 이미 설치되어 있으면:
-
-```bash
-./build.sh --skip-sdk
-```
-
-실행:
-
-```bash
-source /opt/ros/humble/setup.bash
-source ~/ros2_ws/install/setup.bash
-./launch.sh --real
-```
-
-정상 로그 예:
+정상 실행 시 로그에 아래와 비슷한 내용이 나온다.
 
 ```text
 ROS_DOMAIN_ID internal=42
@@ -87,22 +84,48 @@ ROS domains: internal=42 external=0 debug_local_map=42 (not republished)
 Autonomy light ready: lidar=lidar_link target=base_link ...
 ```
 
-## 4. 외부 출력 명세
+설치/출력 확인:
 
-아래 topic은 `external_ros_domain_id`에서 발행된다.
+```bash
+autonomy-light-doctor
+```
+
+HeightMap 수신 예제:
+
+```bash
+ROS_DOMAIN_ID=0 autonomy-light-heightmap-example
+```
+
+## 5. 제어 프로그램이 받는 출력
+
+아래 topic은 `external_ros_domain_id`에서 발행된다. 기본값은 `ROS_DOMAIN_ID=0`이다.
 
 | Topic | Type | QoS | 설명 |
 |---|---|---|---|
-| `/autonomy_light/height_map_data` | `autonomy_light/msg/HeightMap` | Reliable, depth 2 | 제어용 compact height map |
-| `/autonomy_light/height_map` | `sensor_msgs/msg/PointCloud2` | Reliable, depth 2 | height grid를 point cloud로 변환한 debug 출력 |
-| `/autonomy_light/odom` | `nav_msgs/msg/Odometry` | Reliable, depth 10 | Point-LIO odometry를 target frame 기준으로 republish |
-| `/path` | `nav_msgs/msg/Path` | Reliable, depth 10 | Point-LIO path republish |
-| `/tf` | `tf2_msgs/msg/TFMessage` | ROS 기본 TF QoS | `odom -> base_link`, `odom -> base_link_gravity` |
-| `/tf_static` | `tf2_msgs/msg/TFMessage` | ROS 기본 static TF QoS | `base_link -> lidar_link` |
+| `/autonomy_light/height_map_data` | `autonomy_light/msg/HeightMap` | Reliable, Volatile, KeepLast depth 2 | 제어용 height map |
+| `/autonomy_light/height_map` | `sensor_msgs/msg/PointCloud2` | Reliable, Volatile, KeepLast depth 2 | RViz/debug용 height map point cloud |
+| `/autonomy_light/odom` | `nav_msgs/msg/Odometry` | Reliable, Volatile, KeepLast depth 10 | 로봇 odometry |
+| `/path` | `nav_msgs/msg/Path` | Reliable, Volatile, KeepLast depth 10 | 로봇 path |
+| `/tf` | `tf2_msgs/msg/TFMessage` | ROS 2 TF QoS | 동적 TF |
+| `/tf_static` | `tf2_msgs/msg/TFMessage` | ROS 2 static TF QoS | 정적 TF |
 
-### Custom HeightMap 메시지
+수신 측 ROS 환경:
 
-파일: `msg/HeightMap.msg`
+```bash
+source /opt/ros/humble/setup.bash
+source /opt/cocelo/autonomy-light/install/setup.bash
+export ROS_DOMAIN_ID=0
+```
+
+수신 측에서 custom message 확인:
+
+```bash
+ros2 interface show autonomy_light/msg/HeightMap
+```
+
+## 6. HeightMap 메시지
+
+메시지 타입:
 
 ```ros
 float32[] data
@@ -111,18 +134,7 @@ float32 x_length
 float32 y_length
 ```
 
-수신 확인:
-
-```bash
-ROS_DOMAIN_ID=0 ros2 interface show autonomy_light/msg/HeightMap
-ROS_DOMAIN_ID=0 ros2 topic echo /autonomy_light/height_map_data
-```
-
-## 5. HeightMap 데이터 계약
-
-### Shape
-
-수신자는 아래 방식으로 grid shape를 계산한다.
+shape 계산:
 
 ```text
 width  = ceil(x_length / resolution)
@@ -130,20 +142,18 @@ height = ceil(y_length / resolution)
 data.size() == width * height
 ```
 
-현재 기본값:
+기본 설정에서는:
 
 ```text
 resolution = 0.05
-x_length = 1.2
-y_length = 1.2
-width = 24
-height = 24
-data.size() = 576
+x_length   = 1.2
+y_length   = 1.2
+width      = 24
+height     = 24
+data.size  = 576
 ```
 
-### 순서
-
-`data`는 autonomy DDS `HeightMap.idl`의 `sequence<float> data`와 같은 row-major 순서다.
+배열 순서:
 
 ```text
 index = row * width + col
@@ -151,174 +161,141 @@ row: y_min -> y_max
 col: x_min -> x_max
 ```
 
-`autonomy-light`의 grid는 로봇 중심이다.
+cell 중심 좌표:
 
 ```text
 x_min = -0.5 * x_length
-x_max =  0.5 * x_length
 y_min = -0.5 * y_length
-y_max =  0.5 * y_length
 
-x(col) = x_min + (col + 0.5) * resolution
-y(row) = y_min + (row + 0.5) * resolution
+x = x_min + (col + 0.5) * resolution
+y = y_min + (row + 0.5) * resolution
 ```
 
-### 값 의미
-
-`autonomy-light` 내부 grid의 `grid_z`는 바닥 0, 장애물 양수인 height 값이다. 외부 `HeightMap.data`는 Isaac/autonomy height scanner style과 맞추기 위해 distance 형태로 변환된다.
+값 의미:
 
 ```text
-base_height = max(0, algorithm.clipping.max_z)
-data[index] = clamp(base_height - grid_z, 0, base_height)
+data[index] = base_height - obstacle_height
+base_height = algorithm.clipping.max_z
 ```
 
-현재 기본값에서:
+기본 `base_height`는 `0.48`이다.
 
 ```text
-base_height = 0.48
-flat ground grid_z = 0.0  -> data = 0.48
-obstacle grid_z = 0.20    -> data = 0.28
-high obstacle grid_z >= 0.48 -> data = 0.0
+평지:        data ~= 0.48
+낮은 장애물: data < 0.48
+높은 장애물: data -> 0.0
 ```
 
-즉, 제어/학습 쪽에서 기존 Isaac height scanner와 같이 “거리값”으로 해석할 수 있다.
+즉 `data`는 “위에서 아래로 잰 거리값”처럼 해석하면 된다. 기존 Isaac height scanner 또는 sim-to-real pipeline에서 distance height map을 쓰는 경우 이 값을 그대로 연결하기 쉽다.
 
-## 6. 내부 입력 명세
+## 7. Python 수신 예제
 
-아래 topic은 기본적으로 `internal_ros_domain_id`에서 사용된다.
+패키지 설치 후 바로 실행:
 
-| Topic | Type | Producer | Consumer | 설명 |
-|---|---|---|---|---|
-| `/livox/lidar` | `livox_ros_driver2/msg/CustomMsg` | Livox driver | Point-LIO | MID360 raw point packet |
-| `/livox/imu` | `sensor_msgs/msg/Imu` | Livox driver | Point-LIO | MID360 internal IMU |
-| `/aft_mapped_to_init` | `nav_msgs/msg/Odometry` | Point-LIO | autonomy-light | SLAM odometry |
-| `/point_lio/local_map` | `sensor_msgs/msg/PointCloud2` | Point-LIO | autonomy-light | height map source |
-| `/path` | `nav_msgs/msg/Path` | Point-LIO | autonomy-light | path republish source |
-| `/cloud_registered` | `sensor_msgs/msg/PointCloud2` | Point-LIO | autonomy-light optional | optional fill source |
+```bash
+ROS_DOMAIN_ID=0 autonomy-light-heightmap-example
+```
 
-## 7. 주요 파라미터 설명
+직접 코드에서 사용할 때의 QoS:
 
-### Frame
+```python
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
-| Parameter | Default | 설명 |
-|---|---|---|
-| `target_frame` | `base_link` | 제어 기준 로봇 frame |
-| `height_map_frame` | `base_link_gravity` | roll/pitch를 제거한 yaw-only height map frame |
-| `lidar_frame` | `lidar_link` | LiDAR frame 이름 |
-| `target_to_lidar_xyz` | `[0.038335, 0.00162081, 0.138986]` | target frame 기준 LiDAR 위치 |
-| `target_to_lidar_rpy` | `[3.1416, 0.0, 0.0]` | target frame 기준 LiDAR 자세 |
+qos = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=2,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.VOLATILE,
+)
+```
 
-### Grid
+subscribe topic:
 
-| Parameter | Default | 설명 |
-|---|---|---|
-| `elevation_resolution` | `0.05` | height map cell 크기 |
-| `elevation_x_length` | `1.2` | x 방향 map 크기 |
-| `elevation_y_length` | `1.2` | y 방향 map 크기 |
-| `publish_rate_hz` | `50.0` | 외부 출력 publish rate |
+```python
+from autonomy_light.msg import HeightMap
 
-### Height Origin
+node.create_subscription(
+    HeightMap,
+    "/autonomy_light/height_map_data",
+    callback,
+    qos,
+)
+```
 
-| Parameter | Default | 설명 |
-|---|---|---|
-| `height_origin.mode` | `local_floor` | z 기준 결정 방식. `local_floor`, `odom`, `fixed` 지원 |
-| `height_origin.fixed_z` | `0.0` | fixed 모드 z 기준 |
-| `height_origin.filter_alpha` | `0.25` | height origin low-pass 계수 |
-| `height_origin.max_step` | `0.03` | 한 frame에서 기준 높이가 변할 수 있는 최대량 |
-| `height_origin.floor_radius` | `0.6` | local floor 후보 탐색 반경 |
-| `height_origin.floor_percentile` | `0.20` | floor 후보 percentile |
-| `height_origin.floor_min_points` | `20` | floor 추정 최소 point 수 |
+## 8. 빠른 점검 명령
 
-### Domain
-
-| Parameter | Default | 설명 |
-|---|---|---|
-| `internal_ros_domain_id` | `42` | LiDAR/SLAM/internal map domain |
-| `external_ros_domain_id` | `0` | 제어용 SBC 출력 domain |
-| `debug_local_map_ros_domain_id` | `42` | local map debug republish domain |
-| `debug_local_map_topic` | `/point_lio/local_map` | debug local map topic |
-
-### Livox Network
-
-| Parameter | Default | 설명 |
-|---|---|---|
-| `livox_interface` | `enP8p1s0` | MID360 연결 NIC |
-| `livox_host_ip` | `192.168.1.50/24` | Jetson LiDAR NIC 고정 IP |
-| `livox_lidar_ip` | `192.168.1.166` | MID360 LiDAR IP |
-
-### Topic Names
-
-| Parameter | Default | 설명 |
-|---|---|---|
-| `raw_lidar_topic` | `/livox/lidar` | Livox raw LiDAR topic |
-| `raw_imu_topic` | `/livox/imu` | Livox IMU topic |
-| `point_lio_odom_topic` | `/aft_mapped_to_init` | Point-LIO odom input |
-| `point_lio_map_topic` | `/point_lio/local_map` | Point-LIO local map input |
-| `point_lio_registered_topic` | `/cloud_registered` | optional registered scan input |
-| `odom_output_topic` | `/autonomy_light/odom` | external odom output |
-| `height_map_topic` | `/autonomy_light/height_map` | external PointCloud2 height map output |
-| `height_map_msg_topic` | `/autonomy_light/height_map_data` | external custom HeightMap output |
-| `path_output_topic` | `/path` | external path output |
-
-### Backend 및 Filtering
-
-| Parameter | Default | 설명 |
-|---|---|---|
-| `algorithm.elevation_backend` | `autonomy_min_z` | cell 대표값 선택 방식 |
-| `algorithm.clipping.enabled` | `true` | height clamp 사용 여부 |
-| `algorithm.clipping.min_z` | `0.0` | 최소 height |
-| `algorithm.clipping.max_z` | `0.48` | 최대 height 및 custom HeightMap base height |
-| `algorithm.min_z.min_points_per_cell` | `3` | cell 채택 최소 point 수 |
-| `algorithm.min_z.supported_min_enabled` | `true` | 낮은 cluster support 기반 min-z 사용 |
-| `algorithm.min_z.support_band` | `0.04` | floor cluster z 폭 |
-| `algorithm.min_z.obstacle_override_enabled` | `true` | 높은 cluster가 있으면 장애물로 우선 선택 |
-| `algorithm.min_z.obstacle_min_height` | `0.06` | 장애물로 볼 최소 상대 높이 |
-| `algorithm.min_z.obstacle_min_points` | `2` | 장애물 cluster 최소 point 수 |
-| `algorithm.min_z.obstacle_support_band` | `0.06` | 장애물 cluster z 폭 |
-
-### Post Processing
-
-| Parameter | Default | 설명 |
-|---|---|---|
-| `interpolation_max_passes` | `2` | 빈 cell interpolation 반복 횟수 |
-| `interpolation_min_neighbors` | `3` | interpolation 최소 neighbor 수 |
-| `fill_remaining_height` | `0.0` | 마지막 남은 빈 cell 기본값 |
-| `algorithm.frame_aggregation.temporal_alpha` | `1.0` | 이전 grid와 현재 grid 혼합 비율 |
-| `algorithm.isolated_filter.radius` | `1` | isolated noise 판단 반경 |
-| `algorithm.isolated_filter.min_support_neighbors` | `3` | 정상 cell로 볼 최소 주변 support |
-| `algorithm.hole_fill.radius` | `1` | hole fill 반경 |
-| `algorithm.hole_fill.min_neighbors` | `4` | hole fill 최소 neighbor 수 |
-| `algorithm.bilateral.passes` | `0` | bilateral smoothing 횟수. 0이면 off |
-
-## 8. 수신 SBC 체크리스트
-
-1. `autonomy_light` 패키지 또는 메시지 인터페이스를 수신 workspace에 포함한다.
-2. 수신 SBC에서 `source ~/ros2_ws/install/setup.bash`를 실행한다.
-3. `ROS_DOMAIN_ID=0`으로 외부 출력 domain을 맞춘다.
-4. `/autonomy_light/height_map_data`를 subscribe한다.
-5. `data.size()`가 `ceil(x_length/resolution) * ceil(y_length/resolution)`와 같은지 확인한다.
-6. `data`는 row-major distance 배열로 해석한다.
-
-## 9. 빠른 디버그 명령
+외부 출력 topic 확인:
 
 ```bash
 ROS_DOMAIN_ID=0 ros2 topic list | grep autonomy_light
-ROS_DOMAIN_ID=0 ros2 interface show autonomy_light/msg/HeightMap
 ROS_DOMAIN_ID=0 ros2 topic hz /autonomy_light/height_map_data
 ROS_DOMAIN_ID=0 ros2 topic echo /autonomy_light/height_map_data --once
 ```
 
-내부 local map 확인:
+odometry 확인:
 
 ```bash
-ROS_DOMAIN_ID=42 rviz2
+ROS_DOMAIN_ID=0 ros2 topic hz /autonomy_light/odom
 ```
 
-외부 domain에 local map이 새는지 확인:
+local map이 제어 domain에 새는지 확인:
 
 ```bash
 ROS_DOMAIN_ID=0 ros2 topic list | grep point_lio/local_map
 ```
 
-정상 실기체 운용에서는 아무것도 나오지 않아야 한다.
+정상 운용에서는 아무것도 나오지 않는 것이 좋다.
 
+내부 debug local map을 보고 싶을 때:
+
+```bash
+ROS_DOMAIN_ID=42 rviz2
+```
+
+RViz에서 `/point_lio/local_map`이 안 보이면 PointCloud2 display의 Reliability를 `Best Effort`로 바꾼다.
+
+## 9. 자주 나는 문제
+
+### `autonomy_light/msg/HeightMap` 타입을 모른다고 나올 때
+
+수신 환경에서 runtime setup을 source한다.
+
+```bash
+source /opt/ros/humble/setup.bash
+source /opt/cocelo/autonomy-light/install/setup.bash
+ROS_DOMAIN_ID=0 ros2 interface show autonomy_light/msg/HeightMap
+```
+
+### topic이 안 보일 때
+
+수신 측 `ROS_DOMAIN_ID`가 `external_ros_domain_id`와 같은지 확인한다.
+
+```bash
+grep external_ros_domain_id /etc/cocelo/autonomy-light/autonomy_light.yaml
+echo $ROS_DOMAIN_ID
+```
+
+### MID360 연결이 안 될 때
+
+설정 파일의 NIC와 IP를 확인한다.
+
+```bash
+grep -E 'livox_interface|livox_host_ip|livox_lidar_ip' /etc/cocelo/autonomy-light/autonomy_light.yaml
+ip -br addr
+```
+
+### RViz에서 point cloud가 안 보일 때
+
+debug local map은 Best Effort QoS일 수 있다. RViz PointCloud2 display에서 Reliability를 `Best Effort`로 설정한다.
+
+## 10. 제거
+
+```bash
+sudo apt remove cocelo-autonomy-light
+```
+
+설정 파일까지 제거하려면:
+
+```bash
+sudo apt purge cocelo-autonomy-light
+```
