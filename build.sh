@@ -127,4 +127,7 @@ Next:
   source /opt/ros/${ROS_DISTRO_NAME}/setup.bash
   source ${WORKSPACE_DIR}/install/setup.bash
   ${SCRIPT_DIR}/launch.sh --real
+
+Build a runtime .deb:
+  ${SCRIPT_DIR}/scripts/package_deb.sh
 EOF

@@ -47,6 +47,12 @@ autonomy_light:
     height_map_topic: "/autonomy_light/height_map"
     height_map_msg_topic: "/autonomy_light/height_map_data"
     path_output_topic: "/path"
+    height_map_debug:
+      # When enabled, publish a constant height map for receiver/control debugging
+      # without requiring Point-LIO map input. /autonomy_light/height_map_data is
+      # filled directly with manual_value.
+      manual_mode: false
+      manual_value: 0.48
     interpolation_max_passes: 2
     interpolation_min_neighbors: 3
     fill_remaining_height: 0.0

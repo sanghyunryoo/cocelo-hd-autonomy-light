@@ -258,6 +258,44 @@ base_height = algorithm.clipping.max_z
 
 즉 `data`는 “위에서 아래로 잰 거리값”처럼 해석하면 된다. 기존 Isaac height scanner 또는 sim-to-real pipeline에서 distance height map을 쓰는 경우 이 값을 그대로 연결하기 쉽다.
 
+### Manual Height Map Debug Mode
+
+수신 프로그램이나 제어 파이프라인만 점검하고 싶을 때는 manual mode를 켤 수
+있다. 이 모드는 Point-LIO local map 입력이 없어도
+`/autonomy_light/height_map_data`를 계속 발행한다.
+
+Jetson에서 `/etc/cocelo/autonomy-light/autonomy_light.yaml`에 아래 값을 둔다.
+기존 설치 장비에서는 `.deb` 재설치 시 `/etc` 설정 파일이 보존될 수 있으므로
+항목이 없으면 직접 추가한다.
+
+```yaml
+height_map_debug:
+  manual_mode: true
+  manual_value: 0.48
+```
+
+적용하려면 실행 중인 프로세스를 종료하고 다시 실행한다.
+
+```bash
+autonomy-light --real
+```
+
+LiDAR/Point-LIO를 띄우지 않고 수신 경로만 확인하려면 아래처럼 실행한다.
+
+```bash
+autonomy-light --real --no-drivers
+```
+
+manual mode가 켜져 있으면 `data` 배열의 모든 cell이 `manual_value`로 직접
+채워진다. 이 값은 `algorithm.clipping.max_z`를 거쳐 변환되는 값이 아니라
+수신자가 보는 최종 `HeightMap.data` 값이다.
+
+확인:
+
+```bash
+ROS_DOMAIN_ID=0 ros2 topic echo /autonomy_light/height_map_data --once
+```
+
 ## 7. Python 수신 예제
 
 패키지 설치 후 바로 실행:

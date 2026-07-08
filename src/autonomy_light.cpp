@@ -201,6 +201,13 @@ public:
       grid_spec_.resolution,
       elevation_backend_.c_str(),
       publish_rate_hz_);
+    if (height_map_manual_mode_) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Height map manual debug mode enabled: %s will be filled with %.3f",
+        height_map_msg_topic_.c_str(),
+        height_map_manual_value_);
+    }
   }
 
   ~AutonomyLightNode() override
@@ -305,6 +312,10 @@ private:
       "height_map_msg_topic", height_map_msg_topic_);
     path_output_topic_ = declare_parameter<std::string>("path_output_topic", path_output_topic_);
     heartbeat_topic_ = declare_parameter<std::string>("heartbeat_topic", heartbeat_topic_);
+    height_map_manual_mode_ = declare_parameter<bool>(
+      "height_map_debug.manual_mode", height_map_manual_mode_);
+    height_map_manual_value_ = declare_parameter<double>(
+      "height_map_debug.manual_value", height_map_manual_value_);
     interpolation_max_passes_ = std::max(
       0,
       static_cast<int>(declare_parameter<int>("interpolation_max_passes", interpolation_max_passes_)));
@@ -1766,7 +1777,16 @@ private:
   void publishLatest()
   {
     ElevationGrid grid;
-    if (buildElevationGridFromMap(grid)) {
+    if (height_map_manual_mode_) {
+      grid = buildManualHeightGrid();
+      {
+        std::lock_guard<std::mutex> lock(grid_mutex_);
+        latest_grid_ = grid;
+        has_grid_ = true;
+      }
+      height_map_pub_->publish(gridToPointCloud(grid));
+      height_map_msg_pub_->publish(manualHeightMapMsg(grid));
+    } else if (buildElevationGridFromMap(grid)) {
       {
         std::lock_guard<std::mutex> lock(grid_mutex_);
         latest_grid_ = grid;
@@ -1790,6 +1810,17 @@ private:
       publishTargetFrameTransform(odom);
       publishHeightMapFrameTransform(odom);
     }
+  }
+
+  ElevationGrid buildManualHeightGrid() const
+  {
+    ElevationGrid grid(grid_spec_);
+    grid.header.stamp = now();
+    grid.header.frame_id = height_map_frame_;
+    grid.height.assign(
+      static_cast<std::size_t>(grid.spec.width()) * grid.spec.height(),
+      static_cast<float>(height_map_manual_value_));
+    return grid;
   }
 
   sensor_msgs::msg::PointCloud2 gridToPointCloud(const ElevationGrid & grid) const
@@ -1836,6 +1867,18 @@ private:
     return cloud;
   }
 
+  ::autonomy_light::msg::HeightMap manualHeightMapMsg(const ElevationGrid & grid) const
+  {
+    ::autonomy_light::msg::HeightMap msg;
+    msg.resolution = static_cast<float>(grid.spec.resolution);
+    msg.x_length = static_cast<float>(grid.spec.x_length);
+    msg.y_length = static_cast<float>(grid.spec.y_length);
+
+    const auto count = static_cast<std::size_t>(grid.spec.width()) * grid.spec.height();
+    msg.data.assign(count, static_cast<float>(height_map_manual_value_));
+    return msg;
+  }
+
   ::autonomy_light::msg::HeightMap gridToHeightMapMsg(const ElevationGrid & grid) const
   {
     ::autonomy_light::msg::HeightMap msg;
@@ -1879,7 +1922,11 @@ private:
     const bool map_stale = map_count_ == 0 ||
       (now() - last_map_time_) > rclcpp::Duration::from_seconds(2.0);
 
-    if (lidar_stale) {
+    if (height_map_manual_mode_) {
+      msg.data = "ready:manual_height_map:value=" +
+        shortDouble(height_map_manual_value_) +
+        ":publish_hz=" + shortDouble(publish_rate_hz_);
+    } else if (lidar_stale) {
       msg.data = "waiting_for_lidar";
     } else if (odom_stale) {
       msg.data = "degraded:waiting_for_point_lio_odom";
@@ -1934,6 +1981,8 @@ private:
   std::string height_map_msg_topic_{"/autonomy_light/height_map_data"};
   std::string path_output_topic_{"/path"};
   std::string heartbeat_topic_{"/autonomy_light/heartbeat"};
+  bool height_map_manual_mode_{false};
+  double height_map_manual_value_{0.48};
   int interpolation_max_passes_{8};
   int interpolation_min_neighbors_{1};
   double fill_remaining_height_{0.0};

@@ -270,6 +270,15 @@ echo "== message interface =="
 ros2 interface show autonomy_light/msg/HeightMap
 echo
 
+echo "== height map manual debug config =="
+CONFIG_FILE="\${AUTONOMY_LIGHT_CONFIG:-/etc/cocelo/autonomy-light/autonomy_light.yaml}"
+if grep -q '^[[:space:]]*height_map_debug:' "\${CONFIG_FILE}" 2>/dev/null; then
+  grep -A8 '^[[:space:]]*height_map_debug:' "\${CONFIG_FILE}" || true
+else
+  echo "height_map_debug not configured; defaults: manual_mode=false manual_value=0.48"
+fi
+echo
+
 echo "== external domain topics =="
 ROS_DOMAIN_ID=0 ros2 topic list | egrep 'autonomy_light|/tf|/path' || true
 echo

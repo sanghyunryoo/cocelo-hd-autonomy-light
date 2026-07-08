@@ -153,6 +153,24 @@ data[index] = base_height - grid_z
 With the default `clipping.max_z: 0.48`, flat ground is near `0.48` and
 obstacles produce smaller distance values.
 
+For receiver/control debugging without Point-LIO input, enable the manual
+height map mode in `/etc/cocelo/autonomy-light/autonomy_light.yaml`:
+
+```yaml
+height_map_debug:
+  manual_mode: true
+  manual_value: 0.48
+```
+
+When enabled, `/autonomy_light/height_map_data.data` is filled directly with
+`manual_value` at `publish_rate_hz`. Restart `autonomy-light --real` after
+editing the YAML. To test only the receiver path without starting Livox or
+Point-LIO, run:
+
+```bash
+autonomy-light --real --no-drivers
+```
+
 The receiving SBC must have this package built and sourced so the custom
 message type is available. When using the `.deb`, source the packaged install
 tree:
