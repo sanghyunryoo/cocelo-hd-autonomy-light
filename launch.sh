@@ -193,6 +193,17 @@ print("" if domain is None else str(domain).strip())
 PY
 }
 
+default_livox_config_path() {
+  if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "${XDG_RUNTIME_DIR}" && -w "${XDG_RUNTIME_DIR}" ]]; then
+    echo "${XDG_RUNTIME_DIR}/autonomy_light_livox_mid360_config.json"
+    return
+  fi
+
+  local uid
+  uid="${UID:-$(id -u)}"
+  echo "/tmp/autonomy_light_${uid}_livox_mid360_config.json"
+}
+
 interface_has_ip() {
   local iface="$1"
   local local_host="$2"
@@ -314,7 +325,7 @@ configure_livox_network() {
     fi
   fi
 
-  LIVOX_CONFIG_PATH="/tmp/autonomy_light_livox_mid360_config.json"
+  LIVOX_CONFIG_PATH="$(default_livox_config_path)"
   write_livox_mid360_config "${LIVOX_CONFIG_PATH}" "${host_ip}" "${lidar_ip}"
   echo "Livox MID360 network: iface=${iface} host=${host_ip} lidar=${lidar_ip} config=${LIVOX_CONFIG_PATH}"
 }

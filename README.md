@@ -60,7 +60,7 @@ Install and run on the target Jetson:
 sudo apt update
 sudo apt install ./cocelo-autonomy-light_0.1.0-1_arm64.deb
 sudo nano /etc/cocelo/autonomy-light/autonomy_light.yaml
-sudo autonomy-light --real
+autonomy-light --real
 ```
 
 The package installs the binary runtime under `/opt/cocelo/autonomy-light`, the
@@ -71,6 +71,8 @@ The target Jetson is assumed to already have ROS 2 Humble installed under
 the autonomy-light binaries, generated `HeightMap` message interface, vendored
 Livox ROS driver2 install tree, Point-LIO runtime, docs, examples, and the
 Livox-SDK2 shared library when it is present at build time.
+Run the ROS runtime as the normal login user. The launcher uses `sudo` only for
+the MID360 network interface setup when needed.
 
 Basic checks:
 

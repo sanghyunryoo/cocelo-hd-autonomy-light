@@ -73,7 +73,7 @@ debug_local_map_ros_domain_id: 42
 ## 4. 실행
 
 ```bash
-sudo autonomy-light --real
+autonomy-light --real
 ```
 
 정상 실행 시 로그에 아래와 비슷한 내용이 나온다.
@@ -83,6 +83,12 @@ ROS_DOMAIN_ID internal=42
 ROS domains: internal=42 external=0 debug_local_map=42 (not republished)
 Autonomy light ready: lidar=lidar_link target=base_link ...
 ```
+
+ROS 2 node는 일반 로그인 사용자로 실행하는 것을 권장한다. MID360 네트워크
+설정이 필요할 때만 launcher 내부에서 `sudo ip ...`를 사용한다. 전체
+프로세스를 `sudo autonomy-light --real`로 실행하면 같은 Jetson의 일반
+사용자 터미널에서 topic discovery는 되지만 `ros2 topic echo`가 데이터를
+못 받는 DDS shared-memory 권한 문제가 생길 수 있다.
 
 설치/출력 확인:
 

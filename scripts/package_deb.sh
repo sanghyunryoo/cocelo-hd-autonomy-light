@@ -323,7 +323,7 @@ cat > "${STAGE_ROOT}/DEBIAN/postinst" <<'EOF'
 set -e
 echo "cocelo-autonomy-light installed."
 echo "Edit config: /etc/cocelo/autonomy-light/autonomy_light.yaml"
-echo "Run: sudo autonomy-light --real"
+echo "Run: autonomy-light --real"
 echo "Check: autonomy-light-doctor"
 EOF
 chmod 0755 "${STAGE_ROOT}/DEBIAN/postinst"
@@ -356,6 +356,6 @@ if [[ "${ARCH}" != "arm64" ]]; then
 fi
 echo "Install on target ${ARCH} system:"
 echo "  sudo apt install ./$(basename "${DEB_PATH}")"
-echo "  sudo autonomy-light --real"
+echo "  autonomy-light --real"
 echo
 echo "Runtime assumption: ROS 2 ${ROS_DISTRO_NAME} is pre-installed at /opt/ros/${ROS_DISTRO_NAME}."
