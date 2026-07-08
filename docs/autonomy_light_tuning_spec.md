@@ -1,8 +1,53 @@
 # autonomy-light 튜닝 명세서
 
 작성일: 2026-07-07  
-대상 파일: `config/autonomy_light.yaml`  
+수정일: 2026-07-08  
+소스 기본값 파일: `config/autonomy_light.yaml`  
+Jetson 런타임 설정 파일: `/etc/cocelo/autonomy-light/autonomy_light.yaml`  
 목적: MID360 + Point-LIO 기반 `autonomy-light`에서 제어용 height map 품질, ROS 2 도메인 분리, 장애물 반응성, 노이즈 억제를 현장에서 조정하기 위한 파라미터 설명서.
+
+## 0. 적용 방법
+
+`.deb`로 설치된 Jetson에서 실제 운용 값을 바꾸려면 아래 파일을 수정한다.
+
+```bash
+sudo nano /etc/cocelo/autonomy-light/autonomy_light.yaml
+```
+
+파라미터는 실행 시작 시 읽힌다. 실행 중 YAML을 바꿔도 자동 반영되지 않으므로
+기존 프로세스를 종료한 뒤 다시 실행한다.
+
+```bash
+# 실행 중인 terminal에서 Ctrl-C 후
+autonomy-light --real
+```
+
+남아 있는 프로세스가 의심되면 정리 후 실행한다.
+
+```bash
+sudo pkill -f autonomy-light || true
+sudo pkill -f autonomy_light || true
+autonomy-light --real
+```
+
+새 `.deb`의 기본값을 바꾸려면 repo의 `config/autonomy_light.yaml`을 수정한 뒤
+Jetson에서 다시 packaging한다. 이미 설치된 장비의 현장 값은
+`/etc/cocelo/autonomy-light/autonomy_light.yaml`이 우선이다.
+
+튜닝 후 최소 확인:
+
+```bash
+ROS_DOMAIN_ID=0 ros2 topic hz /autonomy_light/height_map_data
+ROS_DOMAIN_ID=0 ros2 topic echo /autonomy_light/height_map_data --once
+ROS_DOMAIN_ID=0 ros2 topic hz /autonomy_light/odom
+```
+
+내부 Point-LIO 입력이 살아 있는지도 함께 본다.
+
+```bash
+ROS_DOMAIN_ID=42 ros2 topic hz /aft_mapped_to_init
+ROS_DOMAIN_ID=42 ros2 topic hz /point_lio/local_map
+```
 
 ## 1. 튜닝 원칙
 
@@ -19,6 +64,15 @@
    - 노이즈를 줄이려면 `min_points_per_cell`, `min_support_neighbors`를 올린다.
    - 장애물 반응을 빠르게 하려면 `obstacle_min_height`, `obstacle_min_points`를 낮춘다.
    - 장애물 잔상을 줄이려면 previous grid carry-over, interpolation, hole fill을 줄인다.
+
+4. 한 번에 하나의 계열만 바꾼다.
+   - geometry, height origin, min-z, filter/fill을 동시에 바꾸면 원인 추적이 어렵다.
+   - 바꾼 값, 주행 환경, 관찰 결과를 같이 기록한다.
+
+5. 출력 메시지 값은 raw z 높이가 아니라 distance-style 값이다.
+   - `/autonomy_light/height_map_data`는 `data[index] = base_height - grid_z`로 발행된다.
+   - 기본 `base_height`는 `algorithm.clipping.max_z: 0.48`이다.
+   - 평지는 대체로 `0.48`에 가깝고, 높은 장애물일수록 값이 `0.0` 쪽으로 작아진다.
 
 ## 2. 빠른 현장 체크
 
@@ -73,6 +127,22 @@ ROS_DOMAIN_ID=42 rviz2
 2. `algorithm.hole_fill.radius` 또는 `interpolation_max_passes`를 줄인다.
 3. 필요하면 previous grid carry-over를 끄는 옵션을 별도로 추가한다.
 
+### grid 크기나 해상도를 바꿨을 때
+
+확인:
+
+```bash
+ROS_DOMAIN_ID=0 ros2 topic echo /autonomy_light/height_map_data --once
+```
+
+`resolution`, `x_length`, `y_length`, `data` 길이가 기대와 맞아야 한다.
+
+```text
+width  = ceil(x_length / resolution)
+height = ceil(y_length / resolution)
+data.size() == width * height
+```
+
 ## 3. 좌표계 및 센서 장착
 
 ### `target_frame`
@@ -126,6 +196,15 @@ height map cell 크기다. 단위는 meter. 현재값: `0.05`.
 
 - 크면 넓게 보지만 계산량과 외부 publish payload가 늘어난다.
 - 제어에 필요한 범위만 유지하는 것이 좋다.
+- 길이를 키우면 Point-LIO local map crop 범위도 같이 커져 내부 계산량이 늘 수 있다.
+
+### `elevation_x_center`, `elevation_y_center`
+
+height map 중심을 `target_frame` 기준으로 얼마나 이동할지 정한다. config에
+없으면 코드 기본값 `0.0, 0.0`을 사용한다.
+
+- 전방만 더 보고 싶으면 `elevation_x_center`를 양수로 옮기는 방식이 가능하다.
+- 중심을 옮기면 제어기가 배열을 해석하는 원점도 같은 규칙으로 맞춰야 한다.
 
 ### `elevation_min_z`, `elevation_max_z`
 
@@ -133,6 +212,8 @@ config에 없으면 코드 기본값을 사용한다. height map 후보 point를
 
 - 너무 넓으면 천장, 벽, 비정상 누적점이 들어올 수 있다.
 - 너무 좁으면 실제 장애물이 잘린다.
+- 최종 출력 clamp는 `algorithm.clipping.*`에서 따로 한다. 이 값은 후보 point
+  filtering 범위에 가깝다.
 
 ## 5. Height Origin
 
@@ -224,6 +305,22 @@ height map 입력으로 쓰는 Point-LIO local map topic이다. 현재값: `/poi
 
 외부 domain으로 내보내는 제어용 출력 topic이다.
 
+### `height_map_msg_topic`
+
+custom `autonomy_light/msg/HeightMap` 출력 topic이다. 현재값:
+`/autonomy_light/height_map_data`.
+
+- 제어 프로그램은 보통 이 topic을 구독한다.
+- topic 이름을 바꾸면 수신 프로그램과 문서의 subscribe topic도 같이 바꿔야 한다.
+
+### `heartbeat_topic`
+
+runtime 상태 문자열 topic이다. 현재 기본값: `/autonomy_light/heartbeat`.
+
+- 내부 domain의 autonomy-light node에서 발행된다.
+- 상태는 `waiting_for_lidar`, `degraded:waiting_for_point_lio_odom`,
+  `degraded:waiting_for_point_lio_map`, `ready:...` 형태다.
+
 ## 7. LiDAR Network
 
 ### `livox_interface`
@@ -304,6 +401,9 @@ height map 최종값을 범위 안으로 자를지 여부다. 현재값: `true`.
 
 - 과도하게 높은 누적점이 제어 입력을 흔드는 것을 막는다.
 - 높은 장애물 구분이 필요하면 올린다.
+- `/autonomy_light/height_map_data`의 `base_height`로도 사용된다. 이 값을 바꾸면
+  평지 근처 출력값의 기준도 같이 바뀐다.
+- 제어기가 `0.48` 기준으로 학습/튜닝되어 있으면 신중하게 변경한다.
 
 ## 11. Supported Min-Z
 
@@ -425,6 +525,7 @@ floor 후보 cluster를 묶는 z 폭이다.
 
 - `1.0`: 현재값만 사용한다. 반응이 빠르다.
 - 낮출수록 smoothing은 강하지만 장애물 반응과 사라짐이 늦어진다.
+- 장애물 잔상을 줄이고 싶으면 먼저 `1.0`을 유지한다.
 
 ## 15. Isolated Filter
 
@@ -507,13 +608,30 @@ bilateral filter 적용 주기다.
 
 autonomy-light가 Livox driver를 child process로 시작할지 여부다.
 
+- 실차 기본값은 `true`다.
+- 외부에서 Livox driver를 따로 실행 중이면 `false`로 둘 수 있지만 topic과 domain을 맞춰야 한다.
+
 ### `start_point_lio`
 
 autonomy-light가 Point-LIO를 child process로 시작할지 여부다.
 
+- 실차 기본값은 `true`다.
+- 외부 Point-LIO를 따로 실행 중이면 `false`로 둘 수 있지만 `/aft_mapped_to_init`,
+  `/point_lio/local_map` 입력이 내부 domain에 있어야 한다.
+
 ### `child_use_sim_time`
 
 child process에 sim time을 사용할지 여부다.
+
+- 실차에서는 `false`를 유지한다.
+- simulation mode에서만 `true`로 쓴다.
+
+### `monitor_raw_lidar`
+
+raw LiDAR topic 수신 여부를 heartbeat 상태에 반영할지 정한다. 현재값: `false`.
+
+- `true`로 켜면 `/livox/lidar`가 멈췄을 때 `waiting_for_lidar` 상태를 볼 수 있다.
+- 약간의 구독 부하가 생기므로 기본 운용에서는 꺼둔다.
 
 ## 19. 추천 튜닝 프리셋
 
@@ -574,4 +692,3 @@ algorithm:
 | edge가 둔함 | `elevation_resolution`, `bilateral.passes`, `hole_fill.max_height_diff` | resolution을 낮추거나 smoothing을 줄인다 |
 | 구멍이 많음 | `hole_fill.min_neighbors`, `interpolation_max_passes` | fill을 늘린다 |
 | 낮은 outlier가 장애물처럼 보임 | `clipping.min_z`, `min_points_per_cell` | clipping과 support를 강화한다 |
-

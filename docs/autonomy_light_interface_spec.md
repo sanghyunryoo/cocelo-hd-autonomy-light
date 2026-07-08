@@ -16,12 +16,18 @@
 cocelo-autonomy-light_<version>_arm64.deb
 ```
 
-이 `.deb`에는 autonomy-light 실행 파일, custom `HeightMap` 메시지, Livox driver runtime, Point-LIO runtime, 기본 config, 문서, 예제 subscriber가 포함된다. ROS 2 Humble 자체는 포함하지 않는다.
+이 `.deb`에는 autonomy-light 실행 파일, custom `HeightMap` 메시지, Livox driver runtime, SLAM runtime, 기본 config, 문서, 예제 subscriber가 포함된다. ROS 2 Humble 자체는 포함하지 않는다.
 
 ## 2. 설치
 
 ```bash
 sudo apt install ./cocelo-autonomy-light_0.1.0-1_arm64.deb
+```
+
+이미 설치된 장비에 새 `.deb`를 다시 넣을 때는 재설치한다.
+
+```bash
+sudo apt install --reinstall ./cocelo-autonomy-light_0.1.0-1_arm64.deb
 ```
 
 설치 후 주요 경로:
@@ -84,11 +90,6 @@ ROS domains: internal=42 external=0 debug_local_map=42 (not republished)
 Autonomy light ready: lidar=lidar_link target=base_link ...
 ```
 
-ROS 2 node는 일반 로그인 사용자로 실행하는 것을 권장한다. MID360 네트워크
-설정이 필요할 때만 launcher 내부에서 `sudo ip ...`를 사용한다. 전체
-프로세스를 `sudo autonomy-light --real`로 실행하면 같은 Jetson의 일반
-사용자 터미널에서 topic discovery는 되지만 `ros2 topic echo`가 데이터를
-못 받는 DDS shared-memory 권한 문제가 생길 수 있다.
 
 설치/출력 확인:
 
@@ -138,6 +139,69 @@ float32[] data
 float32 resolution
 float32 x_length
 float32 y_length
+```
+
+`.deb`를 설치한 수신 장비에서는 아래처럼 packaged install tree를 source하면
+custom message를 바로 사용할 수 있다.
+
+```bash
+source /opt/ros/humble/setup.bash
+source /opt/cocelo/autonomy-light/install/setup.bash
+ros2 interface show autonomy_light/msg/HeightMap
+```
+
+`.deb`를 설치하지 않고 수신 프로그램 쪽에서 message interface만 직접 만들
+경우에는 ROS 2 package 이름, message 이름, 필드 타입과 순서를 모두 동일하게
+맞춘다.
+
+```text
+package name: autonomy_light
+message file: msg/HeightMap.msg
+message type: autonomy_light/msg/HeightMap
+```
+
+`msg/HeightMap.msg`:
+
+```ros
+float32[] data
+float32 resolution
+float32 x_length
+float32 y_length
+```
+
+최소 `package.xml` 의존성:
+
+```xml
+<buildtool_depend>ament_cmake</buildtool_depend>
+<build_depend>rosidl_default_generators</build_depend>
+<exec_depend>rosidl_default_runtime</exec_depend>
+<member_of_group>rosidl_interface_packages</member_of_group>
+```
+
+최소 `CMakeLists.txt`:
+
+```cmake
+cmake_minimum_required(VERSION 3.16)
+project(autonomy_light)
+
+find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/HeightMap.msg"
+)
+
+ament_export_dependencies(rosidl_default_runtime)
+ament_package()
+```
+
+빌드와 확인:
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --packages-select autonomy_light
+source install/setup.bash
+ros2 interface show autonomy_light/msg/HeightMap
 ```
 
 shape 계산:
@@ -247,7 +311,7 @@ ROS_DOMAIN_ID=0 ros2 topic hz /autonomy_light/odom
 local map이 제어 domain에 새는지 확인:
 
 ```bash
-ROS_DOMAIN_ID=0 ros2 topic list | grep point_lio/local_map
+ROS_DOMAIN_ID=0 ros2 topic list | grep point_lio/local_map ## 안나와야 정상
 ```
 
 정상 운용에서는 아무것도 나오지 않는 것이 좋다.
@@ -279,6 +343,38 @@ ROS_DOMAIN_ID=0 ros2 interface show autonomy_light/msg/HeightMap
 ```bash
 grep external_ros_domain_id /etc/cocelo/autonomy-light/autonomy_light.yaml
 echo $ROS_DOMAIN_ID
+```
+
+### topic은 보이는데 `ros2 topic echo`가 아무것도 안 찍힐 때
+
+실행 터미널에서 `sudo autonomy-light --real`로 실행했는지 확인한다.
+root로 실행된 publisher와 일반 사용자 subscriber 사이에서 DDS
+shared-memory 권한 문제로 discovery만 되고 데이터가 안 올 수 있다.
+
+확인용으로 subscriber도 root로 실행해 본다.
+
+```bash
+sudo bash -lc '
+source /opt/ros/humble/setup.bash
+source /opt/cocelo/autonomy-light/install/setup.bash
+ROS_DOMAIN_ID=0 ros2 topic echo /autonomy_light/odom --once
+'
+```
+
+이 명령에서는 값이 나오고 일반 사용자 터미널에서는 안 나오면 권한 문제다.
+기존 프로세스를 종료한 뒤 일반 사용자로 실행한다.
+
+```bash
+sudo pkill -f autonomy-light || true
+sudo pkill -f autonomy_light || true
+autonomy-light --real
+```
+
+root subscriber에서도 값이 안 나오면 내부 SLAM 입력을 확인한다.
+
+```bash
+ROS_DOMAIN_ID=42 ros2 topic hz /aft_mapped_to_init
+ROS_DOMAIN_ID=42 ros2 topic hz /point_lio/local_map
 ```
 
 ### MID360 연결이 안 될 때
