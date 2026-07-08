@@ -195,13 +195,13 @@ PY
 
 default_livox_config_path() {
   if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "${XDG_RUNTIME_DIR}" && -w "${XDG_RUNTIME_DIR}" ]]; then
-    echo "${XDG_RUNTIME_DIR}/autonomy_light_livox_mid360_config.json"
+    echo "${XDG_RUNTIME_DIR}/autonomy_light_livox_mid360s_config.json"
     return
   fi
 
   local uid
   uid="${UID:-$(id -u)}"
-  echo "/tmp/autonomy_light_${uid}_livox_mid360_config.json"
+  echo "/tmp/autonomy_light_${uid}_livox_mid360s_config.json"
 }
 
 interface_has_ip() {
@@ -216,7 +216,7 @@ interface_has_cidr() {
   ip -o -4 addr show dev "${iface}" | awk '{print $4}' | grep -Fxq "${cidr}"
 }
 
-write_livox_mid360_config() {
+write_livox_mid360s_config() {
   local output_path="$1"
   local host_ip="$2"
   local lidar_ip="$3"
@@ -228,7 +228,7 @@ import sys
 output_path, host_ip, lidar_ip = sys.argv[1:4]
 config = {
     "lidar_summary_info": {"lidar_type": 8},
-    "MID360": {
+    "Mid360s": {
         "lidar_net_info": {
             "cmd_data_port": 56100,
             "push_msg_port": 56200,
@@ -306,7 +306,7 @@ configure_livox_network() {
   fi
 
   local host_cidr="${LIVOX_HOST_IP:-192.168.1.50/24}"
-  local lidar_ip="${LIVOX_LIDAR_IP:-192.168.1.12}"
+  local lidar_ip="${LIVOX_LIDAR_IP:-192.168.1.190}"
   local host_ip="${host_cidr%%/*}"
   [[ "${host_cidr}" == */* ]] || host_cidr="${host_cidr}/24"
 
@@ -326,7 +326,7 @@ configure_livox_network() {
   fi
 
   LIVOX_CONFIG_PATH="$(default_livox_config_path)"
-  write_livox_mid360_config "${LIVOX_CONFIG_PATH}" "${host_ip}" "${lidar_ip}"
+  write_livox_mid360s_config "${LIVOX_CONFIG_PATH}" "${host_ip}" "${lidar_ip}"
   echo "Livox MID360 network: iface=${iface} host=${host_ip} lidar=${lidar_ip} config=${LIVOX_CONFIG_PATH}"
 }
 
@@ -425,7 +425,7 @@ if [[ -n "${LIVOX_CONFIG_PATH}" && "${MODE}" == "real" && "${NO_DRIVERS}" != "tr
     "-p"
     "output_data_type:=0"
     "-p"
-    "frame_id:=${LIVOX_FRAME_ID:-mid360}"
+    "frame_id:=${LIVOX_FRAME_ID:-mid360s}"
     "-p"
     "lvx_file_path:=/tmp/autonomy_light_livox.lvx"
     "-p"

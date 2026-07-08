@@ -32,9 +32,9 @@ autonomy_light:
     debug_local_map_topic: "/point_lio/local_map"
     
     # Optional defaults for MID360 + Point-LIO integration.
-    livox_interface: "enP8p1s0"
+    livox_interface: "eno1"
     livox_host_ip: "192.168.1.50/24"
-    livox_lidar_ip: "192.168.1.166"
+    livox_lidar_ip: "192.168.1.190"
     raw_lidar_topic: "/livox/lidar"
     raw_lidar_msg_type: "livox_custom"
     raw_imu_topic: "/livox/imu"
