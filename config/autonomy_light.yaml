@@ -1,6 +1,6 @@
 autonomy_light:
   ros__parameters:
-    # User-facing setup: pose of the MID360 LiDAR frame in the target frame.
+    # User-facing setup: pose of the Livox LiDAR frame in the target frame.
     target_frame: "base_link"
     height_map_frame: "base_link_gravity"
     lidar_frame: "lidar_link"
@@ -31,7 +31,9 @@ autonomy_light:
     debug_local_map_ros_domain_id: 42
     debug_local_map_topic: "/point_lio/local_map"
     
-    # Optional defaults for MID360 + Point-LIO integration.
+    # Optional defaults for Livox MID360/MID360s + Point-LIO integration.
+    # Can be overridden at runtime with ./launch.sh --mid360 or --mid360s.
+    livox_model: "mid360"
     livox_interface: "eno1"
     livox_host_ip: "192.168.1.50/24"
     livox_lidar_ip: "192.168.1.190"

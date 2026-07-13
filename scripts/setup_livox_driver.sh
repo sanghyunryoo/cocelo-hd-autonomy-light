@@ -184,5 +184,5 @@ Next:
   source /opt/ros/${ROS_DISTRO_NAME}/setup.bash
   source ${WORKSPACE_DIR}/install/setup.bash
   ros2 pkg prefix livox_ros_driver2
-  ${PACKAGE_DIR}/launch.sh --real
+  ${PACKAGE_DIR}/launch.sh --real --mid360
 EOF

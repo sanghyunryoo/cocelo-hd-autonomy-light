@@ -13,21 +13,23 @@
 전달받는 파일:
 
 ```text
-cocelo-autonomy-light_<version>_arm64.deb
+cocelo-autonomy-light_<version>_<arch>.deb
 ```
+
+Jetson용 패키지는 `arm64`, x86_64 워크스테이션용 패키지는 `amd64` suffix를 사용한다.
 
 이 `.deb`에는 autonomy-light 실행 파일, custom `HeightMap` 메시지, Livox driver runtime, SLAM runtime, 기본 config, 문서, 예제 subscriber가 포함된다. ROS 2 Humble 자체는 포함하지 않는다.
 
 ## 2. 설치
 
 ```bash
-sudo apt install ./cocelo-autonomy-light_0.1.0-1_arm64.deb
+sudo apt install ./cocelo-autonomy-light_0.1.0-1_<arch>.deb
 ```
 
 이미 설치된 장비에 새 `.deb`를 다시 넣을 때는 재설치한다.
 
 ```bash
-sudo apt install --reinstall ./cocelo-autonomy-light_0.1.0-1_arm64.deb
+sudo apt install --reinstall ./cocelo-autonomy-light_0.1.0-1_<arch>.deb
 ```
 
 설치 후 주요 경로:
@@ -53,9 +55,10 @@ sudo nano /etc/cocelo/autonomy-light/autonomy_light.yaml
 
 | 항목 | 기본값 | 설명 |
 |---|---:|---|
-| `livox_interface` | `enP8p1s0` | MID360이 연결된 Jetson 유선 NIC |
+| `livox_model` | `mid360` | Livox 모델. 실행 시 `--mid360` 또는 `--mid360s`로 override 가능 |
+| `livox_interface` | `enP8p1s0` | MID360/MID360s가 연결된 Jetson 유선 NIC |
 | `livox_host_ip` | `192.168.1.50/24` | Jetson의 LiDAR 통신용 고정 IP |
-| `livox_lidar_ip` | `192.168.1.166` | MID360 장치 IP |
+| `livox_lidar_ip` | `192.168.1.166` | MID360/MID360s 장치 IP |
 | `internal_ros_domain_id` | `42` | LiDAR/SLAM 내부 ROS 2 domain |
 | `external_ros_domain_id` | `0` | 제어 프로그램이 받을 ROS 2 domain |
 | `debug_local_map_ros_domain_id` | `42` | debug local map 출력 domain |
@@ -79,7 +82,9 @@ debug_local_map_ros_domain_id: 42
 ## 4. 실행
 
 ```bash
-autonomy-light --real
+autonomy-light --real --mid360
+# 또는
+autonomy-light --real --mid360s
 ```
 
 정상 실행 시 로그에 아래와 비슷한 내용이 나온다.
@@ -277,7 +282,7 @@ height_map_debug:
 적용하려면 실행 중인 프로세스를 종료하고 다시 실행한다.
 
 ```bash
-autonomy-light --real
+autonomy-light --real --mid360
 ```
 
 LiDAR/Point-LIO를 띄우지 않고 수신 경로만 확인하려면 아래처럼 실행한다.
@@ -385,7 +390,8 @@ echo $ROS_DOMAIN_ID
 
 ### topic은 보이는데 `ros2 topic echo`가 아무것도 안 찍힐 때
 
-실행 터미널에서 `sudo autonomy-light --real`로 실행했는지 확인한다.
+실행 터미널에서 `autonomy-light --real --mid360` 또는
+`autonomy-light --real --mid360s`를 일반 사용자로 실행했는지 확인한다.
 root로 실행된 publisher와 일반 사용자 subscriber 사이에서 DDS
 shared-memory 권한 문제로 discovery만 되고 데이터가 안 올 수 있다.
 
@@ -405,7 +411,7 @@ ROS_DOMAIN_ID=0 ros2 topic echo /autonomy_light/odom --once
 ```bash
 sudo pkill -f autonomy-light || true
 sudo pkill -f autonomy_light || true
-autonomy-light --real
+autonomy-light --real --mid360
 ```
 
 root subscriber에서도 값이 안 나오면 내부 SLAM 입력을 확인한다.
@@ -415,12 +421,12 @@ ROS_DOMAIN_ID=42 ros2 topic hz /aft_mapped_to_init
 ROS_DOMAIN_ID=42 ros2 topic hz /point_lio/local_map
 ```
 
-### MID360 연결이 안 될 때
+### MID360/MID360s 연결이 안 될 때
 
 설정 파일의 NIC와 IP를 확인한다.
 
 ```bash
-grep -E 'livox_interface|livox_host_ip|livox_lidar_ip' /etc/cocelo/autonomy-light/autonomy_light.yaml
+grep -E 'livox_model|livox_interface|livox_host_ip|livox_lidar_ip' /etc/cocelo/autonomy-light/autonomy_light.yaml
 ip -br addr
 ```
 

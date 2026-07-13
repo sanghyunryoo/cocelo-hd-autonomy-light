@@ -1,7 +1,7 @@
 # cocelo-hd-autonomy-light
 
-Lightweight Jetson runtime for MID360 + Point-LIO based robot-centric height
-map publishing.
+Lightweight Jetson runtime for MID360/MID360s + Point-LIO based robot-centric
+height map publishing.
 
 The package is intended to run on the perception Jetson. Heavy LiDAR and
 mapping topics stay on the internal ROS 2 domain, while control-facing outputs
@@ -35,7 +35,9 @@ Then run:
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
-./launch.sh --real
+./launch.sh --real --mid360
+# or
+./launch.sh --real --mid360s
 ```
 
 ## Debian Runtime Package
@@ -45,20 +47,25 @@ the source tree:
 
 ```bash
 cd ~/ros2_ws/src/cocelo-hd-autonomy-light
-./scripts/package_deb.sh
+./scripts/package_deb.sh --mid360
+# or
+./scripts/package_deb.sh --mid360s
 ```
 
-On Jetson this creates an `arm64` package under `dist/`, for example:
+This creates a package under `dist/` for the current machine architecture.
+On a Jetson it creates `arm64`; on an x86_64 workstation it creates `amd64`.
+For example:
 
 ```text
 dist/cocelo-autonomy-light_0.1.0-1_arm64.deb
+dist/cocelo-autonomy-light_0.1.0-1_amd64.deb
 ```
 
-Install and run on the target Jetson:
+Install and run on a target with the same architecture:
 
 ```bash
 sudo apt update
-sudo apt install ./cocelo-autonomy-light_0.1.0-1_arm64.deb
+sudo apt install "./dist/cocelo-autonomy-light_0.1.0-1_$(dpkg --print-architecture).deb"
 sudo nano /etc/cocelo/autonomy-light/autonomy_light.yaml
 autonomy-light --real
 ```
@@ -72,7 +79,7 @@ the autonomy-light binaries, generated `HeightMap` message interface, vendored
 Livox ROS driver2 install tree, Point-LIO runtime, docs, examples, and the
 Livox-SDK2 shared library when it is present at build time.
 Run the ROS runtime as the normal login user. The launcher uses `sudo` only for
-the MID360 network interface setup when needed.
+the Livox MID360/MID360s network interface setup when needed.
 
 Basic checks:
 
@@ -197,8 +204,8 @@ These topics normally stay on `internal_ros_domain_id`.
 
 | Topic | Type | Producer | Purpose |
 |---|---|---|---|
-| `/livox/lidar` | `livox_ros_driver2/msg/CustomMsg` | Livox ROS Driver2 | MID360 raw LiDAR input to Point-LIO. |
-| `/livox/imu` | `sensor_msgs/msg/Imu` | Livox ROS Driver2 | MID360 internal IMU input to Point-LIO. |
+| `/livox/lidar` | `livox_ros_driver2/msg/CustomMsg` | Livox ROS Driver2 | MID360/MID360s raw LiDAR input to Point-LIO. |
+| `/livox/imu` | `sensor_msgs/msg/Imu` | Livox ROS Driver2 | MID360/MID360s internal IMU input to Point-LIO. |
 | `/aft_mapped_to_init` | `nav_msgs/msg/Odometry` | Point-LIO | Mapping odometry consumed by autonomy-light. |
 | `/point_lio/local_map` | `sensor_msgs/msg/PointCloud2` | Point-LIO | Local map sampled into the control height map. |
 | `/cloud_registered` | `sensor_msgs/msg/PointCloud2` | Point-LIO | Optional fill source when `cloud_registered_fill.enabled` is true. |
@@ -214,6 +221,7 @@ Commonly changed parameters in `config/autonomy_light.yaml`:
 | `elevation_resolution` | `0.05` | Height grid cell size in meters. |
 | `elevation_x_length` / `elevation_y_length` | `1.2` / `1.2` | Robot-centric grid size in meters. |
 | `publish_rate_hz` | `50.0` | External output publish rate. |
+| `livox_model` | `mid360` | Livox model for generated driver config. Override with `--mid360` or `--mid360s`. |
 | `algorithm.elevation_backend` | `autonomy_min_z` | Cell selector matching the autonomy min-z style. |
 | `algorithm.clipping.min_z` / `max_z` | `0.0` / `0.48` | Output height clamp range. |
 | `algorithm.min_z.min_points_per_cell` | `3` | Minimum point support for a cell. |

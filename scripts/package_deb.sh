@@ -6,7 +6,7 @@ usage() {
 Usage:
   scripts/package_deb.sh [options]
 
-Build a source-free Jetson runtime .deb for autonomy-light.
+Build a source-free runtime .deb for autonomy-light.
 
 Assumption:
   The target already has Ubuntu and ROS 2 Humble installed under /opt/ros/humble.
@@ -19,6 +19,9 @@ Options:
   --revision REV          Debian revision suffix. Default: 1.
   --output-dir DIR        Output directory. Default: dist.
   --ros-distro NAME       ROS distro. Default: ROS_DISTRO or humble.
+  --mid360                Set packaged default Livox model to MID360.
+  --mid360s               Set packaged default Livox model to MID360s.
+  --livox-model MODEL     Set packaged default Livox model: mid360 or mid360s.
   --skip-build            Package the existing install tree without rebuilding.
   --no-strip              Do not strip runtime binaries/libraries.
   -h, --help              Show this help.
@@ -42,6 +45,7 @@ REVISION="1"
 OUTPUT_DIR="${REPO_DIR}/dist"
 SKIP_BUILD="false"
 DO_STRIP="true"
+LIVOX_MODEL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -81,6 +85,22 @@ while [[ $# -gt 0 ]]; do
       ROS_DISTRO_NAME="${1#--ros-distro=}"
       shift
       ;;
+    --mid360)
+      LIVOX_MODEL="mid360"
+      shift
+      ;;
+    --mid360s)
+      LIVOX_MODEL="mid360s"
+      shift
+      ;;
+    --livox-model)
+      LIVOX_MODEL="${2:?--livox-model requires mid360 or mid360s}"
+      shift 2
+      ;;
+    --livox-model=*)
+      LIVOX_MODEL="${1#--livox-model=}"
+      shift
+      ;;
     --skip-build)
       SKIP_BUILD="true"
       shift
@@ -106,11 +126,113 @@ print(root.findtext("version", "0.1.0"))
 PY
 }
 
+normalize_livox_model() {
+  local model="${1,,}"
+  model="${model//_/-}"
+  case "${model}" in
+    ""|mid360|mid-360)
+      echo "mid360"
+      ;;
+    mid360s|mid-360s)
+      echo "mid360s"
+      ;;
+    *)
+      echo "error: unsupported Livox model: ${1}" >&2
+      echo "supported Livox models: mid360, mid360s" >&2
+      exit 2
+      ;;
+  esac
+}
+
+read_config_livox_model() {
+  python3 - "${REPO_DIR}/config/autonomy_light.yaml" <<'PY'
+import re
+import sys
+
+pattern = re.compile(r"^\s*livox_model\s*:\s*['\"]?([^'\"#\s]+)")
+with open(sys.argv[1], "r", encoding="utf-8") as stream:
+    for line in stream:
+        match = pattern.match(line)
+        if match:
+            print(match.group(1))
+            break
+    else:
+        print("mid360")
+PY
+}
+
+set_config_livox_model() {
+  local config_file="$1"
+  local model="$2"
+  python3 - "${config_file}" "${model}" <<'PY'
+import re
+import sys
+
+config_file, model = sys.argv[1:3]
+with open(config_file, "r", encoding="utf-8") as stream:
+    lines = stream.readlines()
+
+model_line = re.compile(r"^(\s*)livox_model\s*:.*$")
+for index, line in enumerate(lines):
+    match = model_line.match(line)
+    if match:
+        lines[index] = f'{match.group(1)}livox_model: "{model}"\n'
+        break
+else:
+    for index, line in enumerate(lines):
+        if re.match(r"^\s*ros__parameters\s*:\s*$", line):
+            indent = re.match(r"^(\s*)", line).group(1) + "  "
+            lines.insert(index + 1, f'{indent}livox_model: "{model}"\n')
+            break
+    else:
+        lines.append(f'livox_model: "{model}"\n')
+
+with open(config_file, "w", encoding="utf-8") as stream:
+    stream.writelines(lines)
+PY
+}
+
+detect_deb_arch() {
+  local arch=""
+
+  if command -v dpkg >/dev/null 2>&1; then
+    arch="$(dpkg --print-architecture)"
+  else
+    case "$(uname -m)" in
+      x86_64|amd64)
+        arch="amd64"
+        ;;
+      aarch64|arm64)
+        arch="arm64"
+        ;;
+      *)
+        arch=""
+        ;;
+    esac
+  fi
+
+  case "${arch}" in
+    amd64|arm64)
+      printf '%s\n' "${arch}"
+      ;;
+    *)
+      echo "error: unsupported build architecture: ${arch:-$(uname -m)}" >&2
+      echo "supported Debian architectures: amd64, arm64" >&2
+      exit 1
+      ;;
+  esac
+}
+
 if [[ -z "${VERSION}" ]]; then
   VERSION="$(read_package_version)"
 fi
 
-ARCH="$(dpkg --print-architecture)"
+if [[ -z "${LIVOX_MODEL}" ]]; then
+  LIVOX_MODEL="$(read_config_livox_model)"
+fi
+LIVOX_MODEL="$(normalize_livox_model "${LIVOX_MODEL}")"
+
+ARCH="$(detect_deb_arch)"
 PACKAGE_VERSION="${VERSION}-${REVISION}"
 PACKAGE_NAME="cocelo-autonomy-light"
 STAGE_ROOT="$(mktemp -d /tmp/${PACKAGE_NAME}.XXXXXX)"
@@ -183,6 +305,9 @@ copy_if_exists \
 
 cp -aL "${REPO_DIR}/config/autonomy_light.yaml" \
   "${STAGE_ROOT}/etc/cocelo/autonomy-light/autonomy_light.yaml"
+set_config_livox_model \
+  "${STAGE_ROOT}/etc/cocelo/autonomy-light/autonomy_light.yaml" \
+  "${LIVOX_MODEL}"
 
 cp -aL "${REPO_DIR}/README.md" "${STAGE_ROOT}/usr/share/doc/${PACKAGE_NAME}/README.md"
 if [[ -d "${REPO_DIR}/docs" ]]; then
@@ -210,7 +335,7 @@ artifacts while assuming the target system already provides:
 - Ubuntu userspace for ${ARCH}
 - ROS 2 ${ROS_DISTRO_NAME} installed at /opt/ros/${ROS_DISTRO_NAME}
 - Python 3
-- sudo and iproute2 for real MID360 network setup
+- sudo and iproute2 for real Livox MID360/MID360s network setup
 
 Bundled in this package:
 
@@ -317,8 +442,8 @@ Priority: optional
 Architecture: ${ARCH}
 Maintainer: Cocelo <todo@example.com>
 Depends: bash, sudo, iproute2, python3
-Description: Cocelo autonomy-light Jetson runtime
- Source-free runtime bundle for MID360 Livox driver, Point-LIO mapping, and
+Description: Cocelo autonomy-light runtime
+ Source-free runtime bundle for Livox MID360/MID360s driver, Point-LIO mapping, and
  control-facing autonomy-light height map outputs. This package assumes ROS 2
  ${ROS_DISTRO_NAME} is already installed on the target system.
 EOF
@@ -333,6 +458,7 @@ set -e
 echo "cocelo-autonomy-light installed."
 echo "Edit config: /etc/cocelo/autonomy-light/autonomy_light.yaml"
 echo "Run: autonomy-light --real"
+echo "Override Livox model when needed: autonomy-light --real --mid360 or --mid360s"
 echo "Check: autonomy-light-doctor"
 EOF
 chmod 0755 "${STAGE_ROOT}/DEBIAN/postinst"
@@ -358,13 +484,10 @@ dpkg-deb --build --root-owner-group "${STAGE_ROOT}" "${DEB_PATH}"
 echo
 echo "Created: ${DEB_PATH}"
 echo
-if [[ "${ARCH}" != "arm64" ]]; then
-  echo "Warning: this package is ${ARCH}, not arm64. It will not run on Jetson arm64."
-  echo "Build on an arm64 Jetson or an arm64 CI/builder to create a Jetson package."
-  echo
-fi
 echo "Install on target ${ARCH} system:"
 echo "  sudo apt install ./$(basename "${DEB_PATH}")"
 echo "  autonomy-light --real"
+echo "Packaged default Livox model: ${LIVOX_MODEL}"
+echo "Override when needed: autonomy-light --real --mid360 or --mid360s"
 echo
 echo "Runtime assumption: ROS 2 ${ROS_DISTRO_NAME} is pre-installed at /opt/ros/${ROS_DISTRO_NAME}."

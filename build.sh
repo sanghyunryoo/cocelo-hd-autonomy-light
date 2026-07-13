@@ -126,7 +126,7 @@ Build finished.
 Next:
   source /opt/ros/${ROS_DISTRO_NAME}/setup.bash
   source ${WORKSPACE_DIR}/install/setup.bash
-  ${SCRIPT_DIR}/launch.sh --real
+  ${SCRIPT_DIR}/launch.sh --real --mid360
 
 Build a runtime .deb:
   ${SCRIPT_DIR}/scripts/package_deb.sh

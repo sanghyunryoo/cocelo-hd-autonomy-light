@@ -752,7 +752,7 @@ private:
       if (command.empty()) {
         command = {"ros2", "launch", "livox_ros_driver2", "msg_MID360_launch.py"};
       }
-      child_processes_.start(get_logger(), "MID360 driver", command);
+      child_processes_.start(get_logger(), "Livox driver", command);
     }
 
     if (start_point_lio_) {
