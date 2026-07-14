@@ -6,6 +6,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -27,6 +28,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/executors/single_threaded_executor.hpp>
+#include <rclcpp/version.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -45,6 +47,55 @@ namespace autonomy_light
 {
 namespace
 {
+
+#if defined(RCLCPP_VERSION_GTE) && RCLCPP_VERSION_GTE(8, 0, 0)
+#define AUTONOMY_LIGHT_HAS_RCLCPP_DOMAIN_ID_API 1
+#else
+#define AUTONOMY_LIGHT_HAS_RCLCPP_DOMAIN_ID_API 0
+#endif
+
+int rosDomainIdFromEnvironment()
+{
+  const char * value = std::getenv("ROS_DOMAIN_ID");
+  if (value == nullptr || value[0] == '\0') {
+    return 0;
+  }
+
+  char * end = nullptr;
+  errno = 0;
+  const long parsed = std::strtol(value, &end, 10);
+  if (errno != 0 || end == value || *end != '\0' || parsed < 0) {
+    return 0;
+  }
+  return static_cast<int>(parsed);
+}
+
+class ScopedRosDomainId
+{
+public:
+  explicit ScopedRosDomainId(const int domain_id)
+  {
+    const char * existing = std::getenv("ROS_DOMAIN_ID");
+    if (existing != nullptr) {
+      had_existing_ = true;
+      existing_value_ = existing;
+    }
+    setenv("ROS_DOMAIN_ID", std::to_string(std::max(0, domain_id)).c_str(), 1);
+  }
+
+  ~ScopedRosDomainId()
+  {
+    if (had_existing_) {
+      setenv("ROS_DOMAIN_ID", existing_value_.c_str(), 1);
+    } else {
+      unsetenv("ROS_DOMAIN_ID");
+    }
+  }
+
+private:
+  bool had_existing_{false};
+  std::string existing_value_;
+};
 
 struct GridSpec
 {
@@ -465,8 +516,7 @@ private:
     point_lio_config_file_ = declare_parameter<std::string>(
       "point_lio_config_file", point_lio_config_file_);
 
-    const auto actual_domain =
-      static_cast<int>(get_node_base_interface()->get_context()->get_domain_id());
+    const auto actual_domain = currentRosDomainId();
     if (internal_ros_domain_id_ < 0) {
       internal_ros_domain_id_ = actual_domain;
     }
@@ -513,7 +563,11 @@ private:
     rclcpp::Context::SharedPtr & context_storage) const
   {
     rclcpp::InitOptions init_options;
+#if AUTONOMY_LIGHT_HAS_RCLCPP_DOMAIN_ID_API
     init_options.set_domain_id(static_cast<std::size_t>(std::max(0, domain_id)));
+#else
+    ScopedRosDomainId scoped_domain_id(domain_id);
+#endif
     context_storage = std::make_shared<rclcpp::Context>();
     const char * argv[] = {name.c_str()};
     context_storage->init(1, argv, init_options);
@@ -551,8 +605,7 @@ private:
 
   void configureDomainOutputs()
   {
-    const auto actual_internal_domain =
-      static_cast<int>(get_node_base_interface()->get_context()->get_domain_id());
+    const auto actual_internal_domain = currentRosDomainId();
     if (internal_ros_domain_id_ != actual_internal_domain) {
       RCLCPP_WARN(
         get_logger(),
@@ -627,6 +680,15 @@ private:
       external_ros_domain_id_,
       debug_local_map_ros_domain_id_,
       debug_local_map_pub_ ? "" : " (not republished)");
+  }
+
+  int currentRosDomainId()
+  {
+#if AUTONOMY_LIGHT_HAS_RCLCPP_DOMAIN_ID_API
+    return static_cast<int>(get_node_base_interface()->get_context()->get_domain_id());
+#else
+    return rosDomainIdFromEnvironment();
+#endif
   }
 
   void createIo()
