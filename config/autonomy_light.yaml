@@ -26,8 +26,8 @@ autonomy_light:
     # ROS 2 domain split: keep heavy perception internal, publish only control-facing
     # outputs on the external domain. Set debug_local_map_ros_domain_id to the
     # internal domain to keep local_map private, or to the external domain to view it there.
-    internal_ros_domain_id: 42
-    external_ros_domain_id: 0
+    internal_ros_domain_id: 0
+    external_ros_domain_id: 34
     debug_local_map_ros_domain_id: 42
     debug_local_map_topic: "/point_lio/local_map"
     
@@ -35,11 +35,11 @@ autonomy_light:
     # Can be overridden at runtime with ./launch.sh --mid360 or --mid360s.
     livox_model: "mid360"
     livox_interface: "eno1"
-    livox_host_ip: "192.168.1.50/24"
+    livox_host_ip: "192.168.1.50/24" 
     livox_lidar_ip: "192.168.1.190"
-    raw_lidar_topic: "/livox/lidar"
+    raw_lidar_topic: "f16/livox/lidar"
     raw_lidar_msg_type: "livox_custom"
-    raw_imu_topic: "/livox/imu"
+    raw_imu_topic: "f16/livox/imu"
     monitor_raw_lidar: false
     point_lio_odom_topic: "/aft_mapped_to_init"
     point_lio_map_topic: "/point_lio/local_map"

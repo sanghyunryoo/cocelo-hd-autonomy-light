@@ -9,16 +9,16 @@ Usage:
 Build a source-free runtime .deb for autonomy-light.
 
 Assumption:
-  The target already has Ubuntu and ROS 2 Humble installed under /opt/ros/humble.
+  The target already has the same Ubuntu/ROS 2 pair used to build this package.
   This package bundles the autonomy-light runtime, generated custom message
   interface, vendored Livox ROS driver2 install tree, Point-LIO runtime, docs,
   examples, and Livox-SDK2 shared library when found under /usr/local/lib.
 
 Options:
   --version VERSION       Debian package version. Default: package.xml version.
-  --revision REV          Debian revision suffix. Default: 1.
+  --revision REV          Debian revision base. Default: 1.
   --output-dir DIR        Output directory. Default: dist.
-  --ros-distro NAME       ROS distro. Default: ROS_DISTRO or humble.
+  --ros-distro NAME       ROS distro. Default: ROS_DISTRO or auto-detected /opt/ros.
   --mid360                Set packaged default Livox model to MID360.
   --mid360s               Set packaged default Livox model to MID360s.
   --livox-model MODEL     Set packaged default Livox model: mid360 or mid360s.
@@ -39,7 +39,7 @@ EOF
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 WORKSPACE_DIR="$(cd -- "${REPO_DIR}/../.." && pwd)"
-ROS_DISTRO_NAME="${ROS_DISTRO:-humble}"
+ROS_DISTRO_NAME="${ROS_DISTRO:-}"
 VERSION=""
 REVISION="1"
 OUTPUT_DIR="${REPO_DIR}/dist"
@@ -223,6 +223,93 @@ detect_deb_arch() {
   esac
 }
 
+read_ubuntu_version_id() {
+  local version_id=""
+
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck source=/dev/null
+    source /etc/os-release
+    version_id="${VERSION_ID:-}"
+  fi
+
+  if [[ -z "${version_id}" ]] && command -v lsb_release >/dev/null 2>&1; then
+    version_id="$(lsb_release -rs)"
+  fi
+
+  if [[ -z "${version_id}" ]]; then
+    echo "error: unable to detect Ubuntu version from /etc/os-release" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "${version_id}"
+}
+
+preferred_ros_for_ubuntu() {
+  case "$1" in
+    20.04)
+      printf '%s\n' "foxy"
+      ;;
+    22.04)
+      printf '%s\n' "humble"
+      ;;
+    24.04)
+      printf '%s\n' "jazzy"
+      ;;
+    *)
+      printf '%s\n' ""
+      ;;
+  esac
+}
+
+detect_ros_distro() {
+  local ubuntu_version="$1"
+  local requested="${ROS_DISTRO_NAME}"
+  local ros_root="/opt/ros"
+
+  if [[ -n "${requested}" ]]; then
+    if [[ ! -f "${ros_root}/${requested}/setup.bash" ]]; then
+      echo "error: /opt/ros/${requested}/setup.bash not found" >&2
+      exit 1
+    fi
+    printf '%s\n' "${requested}"
+    return
+  fi
+
+  local preferred
+  preferred="$(preferred_ros_for_ubuntu "${ubuntu_version}")"
+  if [[ -n "${preferred}" && -f "${ros_root}/${preferred}/setup.bash" ]]; then
+    printf '%s\n' "${preferred}"
+    return
+  fi
+
+  local candidates=()
+  local setup_file
+  shopt -s nullglob
+  for setup_file in "${ros_root}"/*/setup.bash; do
+    candidates+=("$(basename "$(dirname "${setup_file}")")")
+  done
+  shopt -u nullglob
+
+  if [[ "${#candidates[@]}" -eq 1 ]]; then
+    printf '%s\n' "${candidates[0]}"
+    return
+  fi
+
+  if [[ "${#candidates[@]}" -gt 1 ]]; then
+    echo "error: multiple ROS distros found under /opt/ros: ${candidates[*]}" >&2
+    echo "hint: choose one with --ros-distro NAME." >&2
+  else
+    echo "error: no ROS 2 setup.bash found under /opt/ros." >&2
+  fi
+  exit 1
+}
+
+ros_ubuntu_revision_suffix() {
+  local ros_distro="$1"
+  local ubuntu_version="$2"
+  printf '%s%s\n' "${ros_distro}" "${ubuntu_version}"
+}
+
 if [[ -z "${VERSION}" ]]; then
   VERSION="$(read_package_version)"
 fi
@@ -233,13 +320,16 @@ fi
 LIVOX_MODEL="$(normalize_livox_model "${LIVOX_MODEL}")"
 
 ARCH="$(detect_deb_arch)"
-PACKAGE_VERSION="${VERSION}-${REVISION}"
+UBUNTU_VERSION_ID="$(read_ubuntu_version_id)"
+ROS_DISTRO_NAME="$(detect_ros_distro "${UBUNTU_VERSION_ID}")"
+REVISION_SUFFIX="$(ros_ubuntu_revision_suffix "${ROS_DISTRO_NAME}" "${UBUNTU_VERSION_ID}")"
+PACKAGE_VERSION="${VERSION}-${REVISION}+${REVISION_SUFFIX}"
 PACKAGE_NAME="cocelo-autonomy-light"
 STAGE_ROOT="$(mktemp -d /tmp/${PACKAGE_NAME}.XXXXXX)"
 trap 'rm -rf "${STAGE_ROOT}"' EXIT
 
 if [[ "${SKIP_BUILD}" != "true" ]]; then
-  "${REPO_DIR}/build.sh" --packages livox_ros_driver2 autonomy_light
+  "${REPO_DIR}/build.sh" --ros-distro "${ROS_DISTRO_NAME}" --packages livox_ros_driver2 autonomy_light
 fi
 
 INSTALL_ROOT="${WORKSPACE_DIR}/install"

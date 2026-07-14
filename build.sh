@@ -98,7 +98,7 @@ if [[ "${CLEAN}" == "true" ]]; then
 fi
 
 echo "Preparing vendored Livox driver"
-"${SCRIPT_DIR}/scripts/setup_livox_driver.sh" "${SETUP_ARGS[@]}"
+ROS_DISTRO="${ROS_DISTRO_NAME}" "${SCRIPT_DIR}/scripts/setup_livox_driver.sh" "${SETUP_ARGS[@]}"
 
 if [[ "${SETUP_ONLY}" == "true" ]]; then
   echo "Setup complete."
@@ -117,7 +117,8 @@ fi
 
 cd "${WORKSPACE_DIR}"
 echo "Building packages: ${PACKAGES[*]}"
-colcon build --packages-up-to "${PACKAGES[@]}"
+colcon build --packages-up-to "${PACKAGES[@]}" \
+  --cmake-args -DROS_EDITION=ROS2 -DDISTRO_ROS="${ROS_DISTRO_NAME}"
 
 cat <<EOF
 
