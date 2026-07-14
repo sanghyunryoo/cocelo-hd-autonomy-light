@@ -56,11 +56,18 @@ ament_target_dependencies(autonomy_light_node
   tf2_ros
 )
 
-rosidl_get_typesupport_target(cpp_typesupport_target
-  ${PROJECT_NAME}
-  "rosidl_typesupport_cpp"
-)
-target_link_libraries(autonomy_light_node "${cpp_typesupport_target}")
+if(COMMAND rosidl_get_typesupport_target)
+  rosidl_get_typesupport_target(cpp_typesupport_target
+    ${PROJECT_NAME}
+    "rosidl_typesupport_cpp"
+  )
+  target_link_libraries(autonomy_light_node "${cpp_typesupport_target}")
+else()
+  rosidl_target_interfaces(autonomy_light_node
+    ${PROJECT_NAME}
+    "rosidl_typesupport_cpp"
+  )
+endif()
 
 set(POINT_LIO_VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/point_lio_ros2")
 add_executable(autonomy_light_pointlio_mapping
