@@ -995,7 +995,8 @@ int main(int argc, char **argv) {
             lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
         RCLCPP_INFO(logger, "LiDAR input type: sensor_msgs/PointCloud2 on %s", lid_topic.c_str());
     }
-    auto sub_imu = nh->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 200000, imu_cbk);
+    auto imu_qos = rclcpp::SensorDataQoS().keep_last(2000);
+    auto sub_imu = nh->create_subscription<sensor_msgs::msg::Imu>(imu_topic, imu_qos, imu_cbk);
 
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFullRes;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFullRes_body;
