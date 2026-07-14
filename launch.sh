@@ -318,6 +318,63 @@ print("" if domain is None else str(domain).strip())
 PY
 }
 
+effective_config_path() {
+  local uid
+  uid="${UID:-$(id -u)}"
+  echo "/tmp/autonomy_light_${uid}_${MODE}_params.yaml"
+}
+
+write_effective_config() {
+  local input_file="$1"
+  local output_file="$2"
+  local lidar_driver_command_json="${3:-}"
+
+  /usr/bin/python3 - \
+    "${input_file}" \
+    "${output_file}" \
+    "${MODE}" \
+    "${NO_DRIVERS}" \
+    "${RAW_LIDAR_TOPIC}" \
+    "${RAW_IMU_TOPIC}" \
+    "${lidar_driver_command_json}" <<'PY'
+import json
+import sys
+
+import yaml
+
+input_file, output_file, mode, no_drivers, raw_lidar_topic, raw_imu_topic, driver_command = sys.argv[1:8]
+with open(input_file, "r", encoding="utf-8") as stream:
+    data = yaml.safe_load(stream) or {}
+
+node = data.setdefault("autonomy_light", {})
+params = node.setdefault("ros__parameters", {})
+
+if mode == "sim":
+    params["start_lidar_driver"] = False
+    params["start_point_lio"] = True
+    params["use_sim_time"] = True
+    params["child_use_sim_time"] = True
+    params["raw_lidar_topic"] = raw_lidar_topic
+    params["raw_lidar_msg_type"] = "pointcloud2"
+    params["raw_imu_topic"] = raw_imu_topic
+else:
+    params["start_lidar_driver"] = True
+    params["start_point_lio"] = True
+    params["use_sim_time"] = False
+    params["child_use_sim_time"] = False
+
+if no_drivers in ("true", "1", "yes", "on"):
+    params["start_lidar_driver"] = False
+    params["start_point_lio"] = False
+
+if driver_command:
+    params["lidar_driver_command"] = json.loads(driver_command)
+
+with open(output_file, "w", encoding="utf-8") as stream:
+    yaml.safe_dump(data, stream, default_flow_style=False, sort_keys=False)
+PY
+}
+
 load_livox_defaults() {
   if [[ ! -f "${CONFIG_FILE}" ]]; then
     LIVOX_FRAME_ID="${LIVOX_FRAME_ID:-livox_frame}"
@@ -527,32 +584,11 @@ if [[ -f "${CONFIG_FILE}" ]]; then
   fi
 fi
 
-EXTRA_ROS_ARGS=()
 if [[ "${MODE}" == "sim" ]]; then
   sim_prefix="${SIM_TOPIC_PREFIX%/}"
   [[ "${sim_prefix}" == "/" ]] && sim_prefix=""
   RAW_LIDAR_TOPIC="${RAW_LIDAR_TOPIC:-${sim_prefix}/livox/lidar}"
   RAW_IMU_TOPIC="${RAW_IMU_TOPIC:-${sim_prefix}/livox/imu}"
-  EXTRA_ROS_ARGS+=(
-    "-p" "start_lidar_driver:=false"
-    "-p" "start_point_lio:=true"
-    "-p" "use_sim_time:=true"
-    "-p" "child_use_sim_time:=true"
-    "-p" "raw_lidar_topic:=${RAW_LIDAR_TOPIC}"
-    "-p" "raw_lidar_msg_type:=pointcloud2"
-    "-p" "raw_imu_topic:=${RAW_IMU_TOPIC}"
-  )
-else
-  EXTRA_ROS_ARGS+=(
-    "-p" "start_lidar_driver:=true"
-    "-p" "start_point_lio:=true"
-    "-p" "use_sim_time:=false"
-    "-p" "child_use_sim_time:=false"
-  )
-fi
-
-if [[ "${NO_DRIVERS}" == "true" ]]; then
-  EXTRA_ROS_ARGS+=("-p" "start_lidar_driver:=false" "-p" "start_point_lio:=false")
 fi
 
 configure_livox_network
@@ -610,16 +646,17 @@ import sys
 print(json.dumps(sys.argv[1:]))
 PY
   )"
-  EXTRA_ROS_ARGS+=("-p" "lidar_driver_command:=${LIVOX_DRIVER_COMMAND_PARAM}")
 fi
 
-echo "autonomy-light mode=${MODE} config=${CONFIG_FILE}"
+EFFECTIVE_CONFIG_FILE="$(effective_config_path)"
+write_effective_config "${CONFIG_FILE}" "${EFFECTIVE_CONFIG_FILE}" "${LIVOX_DRIVER_COMMAND_PARAM:-}"
+
+echo "autonomy-light mode=${MODE} config=${EFFECTIVE_CONFIG_FILE} source_config=${CONFIG_FILE}"
 if [[ "${MODE}" == "sim" ]]; then
   echo "simulation topics: lidar=${RAW_LIDAR_TOPIC} imu=${RAW_IMU_TOPIC}"
 fi
 
 exec ros2 run autonomy_light autonomy_light \
   --ros-args \
-  --params-file "${CONFIG_FILE}" \
-  "${EXTRA_ROS_ARGS[@]}" \
+  --params-file "${EFFECTIVE_CONFIG_FILE}" \
   "$@"
