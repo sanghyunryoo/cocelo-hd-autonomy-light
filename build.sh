@@ -11,7 +11,6 @@ Build autonomy-light, its ROS interfaces, and its vendored Livox ROS Driver2.
 Options:
   --skip-apt          Do not install Ubuntu/ROS dependencies.
   --skip-sdk          Do not build/install Livox-SDK2.
-  --symlink-install   Use colcon --symlink-install so installed configs track source edits.
   --clean             Remove this workspace's build/install/log for these packages first.
   --setup-only        Prepare Livox driver symlink/SDK only; do not run colcon build.
   --packages PKGS     Packages to build. Default: livox_ros_driver2 autonomy_light.
@@ -31,7 +30,6 @@ WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 ROS_DISTRO_NAME="${ROS_DISTRO:-humble}"
 SKIP_APT="false"
 SKIP_SDK="false"
-SYMLINK_INSTALL="${AUTONOMY_LIGHT_SYMLINK_INSTALL:-false}"
 CLEAN="false"
 SETUP_ONLY="false"
 PACKAGES=(livox_ros_driver2 autonomy_light)
@@ -48,10 +46,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-sdk)
       SKIP_SDK="true"
-      shift
-      ;;
-    --symlink-install)
-      SYMLINK_INSTALL="true"
       shift
       ;;
     --clean)
@@ -133,11 +127,7 @@ fi
 
 cd "${WORKSPACE_DIR}"
 echo "Building packages: ${PACKAGES[*]}"
-COLCON_ARGS=(build --packages-up-to "${PACKAGES[@]}")
-if [[ "${SYMLINK_INSTALL}" == "true" || "${SYMLINK_INSTALL}" == "1" || "${SYMLINK_INSTALL}" == "yes" || "${SYMLINK_INSTALL}" == "on" ]]; then
-  COLCON_ARGS+=(--symlink-install)
-fi
-colcon "${COLCON_ARGS[@]}" \
+colcon build --packages-up-to "${PACKAGES[@]}" \
   --cmake-args \
     -DROS_EDITION=ROS2 \
     -DDISTRO_ROS="${ROS_DISTRO_NAME}" \
