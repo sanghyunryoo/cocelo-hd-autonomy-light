@@ -29,6 +29,7 @@ Options:
                       Livox host IP/CIDR. Default: 192.168.1.50/24.
   --livox-lidar-ip IP
                       Livox LiDAR IP. Default: 192.168.1.12.
+  --ros-distro NAME   ROS distro. Default: ROS_DISTRO or auto-detected /opt/ros.
   --skip-livox-network
                       Do not configure Livox host network/config.
 
@@ -46,7 +47,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 INSTALL_PREFIX_DIR="$(cd -- "${SCRIPT_DIR}/../../.." 2>/dev/null && pwd || true)"
 CALLER_WORKSPACE_DIR="$(pwd)"
-ROS_DISTRO_NAME="${ROS_DISTRO:-humble}"
+ROS_DISTRO_NAME="${ROS_DISTRO:-}"
 MODE="real"
 NO_DRIVERS="false"
 SIM_TOPIC_PREFIX="${AUTONOMY_LIGHT_SIM_TOPIC_PREFIX:-/f4}"
@@ -157,6 +158,14 @@ while [[ $# -gt 0 ]]; do
       LIVOX_LIDAR_IP="${2:?--livox-lidar-ip requires an IP}"
       shift 2
       ;;
+    --ros-distro)
+      ROS_DISTRO_NAME="${2:?--ros-distro requires a name}"
+      shift 2
+      ;;
+    --ros-distro=*)
+      ROS_DISTRO_NAME="${1#--ros-distro=}"
+      shift
+      ;;
     --livox-lidar-ip=*)
       LIVOX_LIDAR_IP="${1#--livox-lidar-ip=}"
       shift
@@ -174,6 +183,77 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+read_ubuntu_version_id() {
+  local version_id=""
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck source=/dev/null
+    source /etc/os-release
+    version_id="${VERSION_ID:-}"
+  fi
+  echo "${version_id}"
+}
+
+preferred_ros_for_ubuntu() {
+  case "$1" in
+    20.04)
+      echo "foxy"
+      ;;
+    22.04)
+      echo "humble"
+      ;;
+    24.04)
+      echo "jazzy"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+detect_ros_distro() {
+  local requested="${ROS_DISTRO_NAME}"
+  local ros_root="/opt/ros"
+
+  if [[ -n "${requested}" ]]; then
+    if [[ ! -f "${ros_root}/${requested}/setup.bash" ]]; then
+      echo "error: ROS setup file not found: ${ros_root}/${requested}/setup.bash" >&2
+      exit 1
+    fi
+    echo "${requested}"
+    return
+  fi
+
+  local preferred
+  preferred="$(preferred_ros_for_ubuntu "$(read_ubuntu_version_id)")"
+  if [[ -n "${preferred}" && -f "${ros_root}/${preferred}/setup.bash" ]]; then
+    echo "${preferred}"
+    return
+  fi
+
+  local candidates=()
+  local setup_file
+  shopt -s nullglob
+  for setup_file in "${ros_root}"/*/setup.bash; do
+    candidates+=("$(basename "$(dirname "${setup_file}")")")
+  done
+  shopt -u nullglob
+
+  if [[ "${#candidates[@]}" -eq 1 ]]; then
+    echo "${candidates[0]}"
+    return
+  fi
+
+  if [[ "${#candidates[@]}" -gt 1 ]]; then
+    echo "error: multiple ROS distros found under /opt/ros: ${candidates[*]}" >&2
+    echo "hint: choose one with --ros-distro NAME or export ROS_DISTRO." >&2
+  else
+    echo "error: no ROS setup.bash found under /opt/ros." >&2
+  fi
+  exit 1
+}
+
+ROS_DISTRO_NAME="$(detect_ros_distro)"
 
 normalize_livox_model() {
   local model="${1,,}"
