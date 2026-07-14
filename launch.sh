@@ -16,6 +16,7 @@ Options:
   --config FILE       Override config yaml.
   --sim-topic-prefix PREFIX
                       Simulation topic prefix. Default: /f4 or AUTONOMY_LIGHT_SIM_TOPIC_PREFIX.
+                      Use "" or / for root topics such as /livox/lidar.
   --raw-lidar-topic TOPIC
                       Override raw LiDAR topic.
   --raw-imu-topic TOPIC
@@ -39,6 +40,8 @@ Examples:
   ./launch.sh --real --mid360s
   ./launch.sh --sim
   ./launch.sh --sim --sim-topic-prefix /f16
+  ./launch.sh --sim --sim-topic-prefix ""     # /livox/lidar and /livox/imu
+  AUTONOMY_LIGHT_SIM_TOPIC_PREFIX= ./launch.sh --sim
   ./launch.sh --no-drivers
 EOF
 }
@@ -50,7 +53,7 @@ CALLER_WORKSPACE_DIR="$(pwd)"
 ROS_DISTRO_NAME="${ROS_DISTRO:-}"
 MODE="real"
 NO_DRIVERS="false"
-SIM_TOPIC_PREFIX="${AUTONOMY_LIGHT_SIM_TOPIC_PREFIX:-/f4}"
+SIM_TOPIC_PREFIX="${AUTONOMY_LIGHT_SIM_TOPIC_PREFIX-/f4}"
 RAW_LIDAR_TOPIC=""
 RAW_IMU_TOPIC=""
 LIVOX_MODEL="${AUTONOMY_LIGHT_LIVOX_MODEL:-}"
