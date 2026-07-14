@@ -88,6 +88,16 @@ SETUP_ARGS=()
 [[ "${SKIP_APT}" == "true" ]] && SETUP_ARGS+=(--skip-apt)
 [[ "${SKIP_SDK}" == "true" ]] && SETUP_ARGS+=(--skip-sdk)
 
+detect_build_python() {
+  if [[ -x /usr/bin/python3 ]]; then
+    printf '%s\n' "/usr/bin/python3"
+    return
+  fi
+  command -v python3
+}
+
+BUILD_PYTHON="$(detect_build_python)"
+
 if [[ "${CLEAN}" == "true" ]]; then
   echo "Cleaning build/install/log for: ${PACKAGES[*]}"
   for pkg in "${PACKAGES[@]}"; do
@@ -118,7 +128,11 @@ fi
 cd "${WORKSPACE_DIR}"
 echo "Building packages: ${PACKAGES[*]}"
 colcon build --packages-up-to "${PACKAGES[@]}" \
-  --cmake-args -DROS_EDITION=ROS2 -DDISTRO_ROS="${ROS_DISTRO_NAME}"
+  --cmake-args \
+    -DROS_EDITION=ROS2 \
+    -DDISTRO_ROS="${ROS_DISTRO_NAME}" \
+    -DPYTHON_EXECUTABLE="${BUILD_PYTHON}" \
+    -DPython3_EXECUTABLE="${BUILD_PYTHON}"
 
 cat <<EOF
 

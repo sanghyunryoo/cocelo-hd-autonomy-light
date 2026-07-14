@@ -66,6 +66,14 @@ require_cmd() {
   fi
 }
 
+detect_build_python() {
+  if [[ -x /usr/bin/python3 ]]; then
+    printf '%s\n' "/usr/bin/python3"
+    return
+  fi
+  command -v python3
+}
+
 livox_sdk2_installed() {
   ldconfig -p 2>/dev/null | grep -q "liblivox_lidar_sdk_shared.so" ||
     [[ -f /usr/local/lib/liblivox_lidar_sdk_shared.so ]]
@@ -84,6 +92,7 @@ install_apt_dependencies() {
     git \
     libapr1-dev \
     libpcl-dev \
+    python3-catkin-pkg-modules \
     "ros-${ROS_DISTRO_NAME}-ament-cmake-auto" \
     "ros-${ROS_DISTRO_NAME}-pcl-conversions" \
     "ros-${ROS_DISTRO_NAME}-pcl-ros" \
@@ -168,7 +177,14 @@ build_workspace() {
   fi
 
   cd "${WORKSPACE_DIR}"
-  colcon build --packages-up-to livox_ros_driver2 autonomy_light
+  local build_python
+  build_python="$(detect_build_python)"
+  colcon build --packages-up-to livox_ros_driver2 autonomy_light \
+    --cmake-args \
+      -DROS_EDITION=ROS2 \
+      -DDISTRO_ROS="${ROS_DISTRO_NAME}" \
+      -DPYTHON_EXECUTABLE="${build_python}" \
+      -DPython3_EXECUTABLE="${build_python}"
 }
 
 install_apt_dependencies
