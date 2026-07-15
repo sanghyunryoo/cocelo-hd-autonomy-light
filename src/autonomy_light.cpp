@@ -1018,33 +1018,15 @@ private:
       "extrinsic_T",
       3,
       {0.0, 0.0, 0.0});
-    const auto body_to_lidar_r = parseYamlVector(
-      config_file,
-      "extrinsic_R",
-      9,
-      {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0});
-
     const tf2::Vector3 body_p_lidar(
       body_to_lidar_t[0],
       body_to_lidar_t[1],
       body_to_lidar_t[2]);
-    const tf2::Matrix3x3 body_R_lidar(
-      body_to_lidar_r[0],
-      body_to_lidar_r[1],
-      body_to_lidar_r[2],
-      body_to_lidar_r[3],
-      body_to_lidar_r[4],
-      body_to_lidar_r[5],
-      body_to_lidar_r[6],
-      body_to_lidar_r[7],
-      body_to_lidar_r[8]);
 
-    // Point-LIO estimates the body/IMU pose, while user config describes target -> LiDAR.
-    // Its odom child correction expects target -> body.
+    // Point-LIO odometry is already expressed in its body axes. target_to_lidar_rpy
+    // only describes the raw LiDAR TF, so odom child correction must not rotate it.
     RigidTransform target_to_body;
-    target_to_body.rotation = target_to_lidar_rotation_ * body_R_lidar.transpose();
-    target_to_body.translation =
-      target_to_lidar_translation_ - target_to_body.rotation * body_p_lidar;
+    target_to_body.translation = target_to_lidar_translation_ - body_p_lidar;
     return target_to_body;
   }
 
