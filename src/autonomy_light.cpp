@@ -181,7 +181,16 @@ std::string paramDouble(const double value)
 {
   char buffer[32];
   std::snprintf(buffer, sizeof(buffer), "%.9g", value);
-  return std::string(buffer);
+  std::string text(buffer);
+  if (
+    std::isfinite(value) &&
+    text.find('.') == std::string::npos &&
+    text.find('e') == std::string::npos &&
+    text.find('E') == std::string::npos)
+  {
+    text += ".0";
+  }
+  return text;
 }
 
 std::string vectorParam(const std::vector<double> & values)
