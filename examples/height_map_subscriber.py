@@ -40,7 +40,9 @@ class HeightMapSubscriber(Node):
         else:
             value_range = "empty"
         self.get_logger().info(
-            f"height_map {width}x{height} res={msg.resolution:.3f} "
+            f"height_map frame={msg.header.frame_id} "
+            f"stamp={msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d} "
+            f"{width}x{height} res={msg.resolution:.3f} "
             f"len={len(values)} {value_range}"
         )
 

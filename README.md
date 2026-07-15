@@ -134,14 +134,16 @@ These topics are published on `external_ros_domain_id`.
 The custom height map message is:
 
 ```ros
+std_msgs/Header header
 float32[] data
 float32 resolution
 float32 x_length
 float32 y_length
 ```
 
-`data` is row-major and matches the autonomy DDS `HeightMap.idl` float-array
-contract:
+`header.stamp` is the map publication time and `header.frame_id` is the
+height-map frame. `data` is row-major and matches the autonomy DDS
+`HeightMap.idl` float-array contract:
 
 ```text
 index = row * width + col

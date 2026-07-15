@@ -1940,6 +1940,7 @@ private:
   ::autonomy_light::msg::HeightMap manualHeightMapMsg(const ElevationGrid & grid) const
   {
     ::autonomy_light::msg::HeightMap msg;
+    msg.header = grid.header;
     msg.resolution = static_cast<float>(grid.spec.resolution);
     msg.x_length = static_cast<float>(grid.spec.x_length);
     msg.y_length = static_cast<float>(grid.spec.y_length);
@@ -1952,6 +1953,7 @@ private:
   ::autonomy_light::msg::HeightMap gridToHeightMapMsg(const ElevationGrid & grid) const
   {
     ::autonomy_light::msg::HeightMap msg;
+    msg.header = grid.header;
     msg.resolution = static_cast<float>(grid.spec.resolution);
     msg.x_length = static_cast<float>(grid.spec.x_length);
     msg.y_length = static_cast<float>(grid.spec.y_length);

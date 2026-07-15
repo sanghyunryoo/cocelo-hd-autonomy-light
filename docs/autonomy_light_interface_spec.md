@@ -140,6 +140,7 @@ ros2 interface show autonomy_light/msg/HeightMap
 메시지 타입:
 
 ```ros
+std_msgs/Header header
 float32[] data
 float32 resolution
 float32 x_length
@@ -168,6 +169,7 @@ message type: autonomy_light/msg/HeightMap
 `msg/HeightMap.msg`:
 
 ```ros
+std_msgs/Header header
 float32[] data
 float32 resolution
 float32 x_length

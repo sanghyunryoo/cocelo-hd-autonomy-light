@@ -26,6 +26,7 @@ find_package(OpenMP QUIET)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/HeightMap.msg"
+  DEPENDENCIES std_msgs
 )
 
 ament_export_dependencies(rosidl_default_runtime)
