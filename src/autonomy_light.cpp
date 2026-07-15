@@ -8,9 +8,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -36,7 +38,6 @@
 #include <std_msgs/msg/string.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
-#include <tf2/LinearMath/Transform.h>
 #include <tf2/LinearMath/Vector3.h>
 #if __has_include(<tf2_geometry_msgs/tf2_geometry_msgs.hpp>)
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -163,11 +164,110 @@ struct CellHeight
   int support_count{0};
 };
 
+struct RigidTransform
+{
+  tf2::Vector3 translation{0.0, 0.0, 0.0};
+  tf2::Matrix3x3 rotation{tf2::Quaternion::getIdentity()};
+};
+
 std::string shortDouble(const double value)
 {
   char buffer[32];
   std::snprintf(buffer, sizeof(buffer), "%.3f", value);
   return std::string(buffer);
+}
+
+std::string paramDouble(const double value)
+{
+  char buffer[32];
+  std::snprintf(buffer, sizeof(buffer), "%.9g", value);
+  return std::string(buffer);
+}
+
+std::string vectorParam(const std::vector<double> & values)
+{
+  std::string out = "[";
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (i > 0) {
+      out += ",";
+    }
+    out += paramDouble(values[i]);
+  }
+  out += "]";
+  return out;
+}
+
+std::string matrixParam(const tf2::Matrix3x3 & matrix)
+{
+  std::vector<double> values;
+  values.reserve(9);
+  for (int row = 0; row < 3; ++row) {
+    for (int col = 0; col < 3; ++col) {
+      values.push_back(matrix[row][col]);
+    }
+  }
+  return vectorParam(values);
+}
+
+std::vector<double> parseYamlVector(
+  const std::string & file_path,
+  const std::string & key,
+  const std::size_t expected_size,
+  const std::vector<double> & fallback)
+{
+  std::ifstream input(file_path);
+  if (!input) {
+    return fallback;
+  }
+
+  const std::regex key_regex("^\\s*" + key + "\\s*:");
+  const std::regex number_regex(
+    "[-+]?(?:(?:\\d+\\.?\\d*)|(?:\\.\\d+))(?:[eE][-+]?\\d+)?");
+  std::string line;
+  bool collecting = false;
+  std::string collected;
+
+  while (std::getline(input, line)) {
+    const auto comment = line.find('#');
+    if (comment != std::string::npos) {
+      line.erase(comment);
+    }
+
+    if (!collecting) {
+      if (!std::regex_search(line, key_regex)) {
+        continue;
+      }
+      collecting = true;
+      const auto colon = line.find(':');
+      if (colon != std::string::npos) {
+        collected += line.substr(colon + 1);
+      }
+    } else {
+      collected += " ";
+      collected += line;
+    }
+
+    if (collected.find(']') != std::string::npos) {
+      break;
+    }
+  }
+
+  if (!collecting) {
+    return fallback;
+  }
+
+  std::vector<double> values;
+  for (
+    auto it = std::sregex_iterator(collected.begin(), collected.end(), number_regex);
+    it != std::sregex_iterator();
+    ++it)
+  {
+    values.push_back(std::stod(it->str()));
+  }
+  if (values.size() != expected_size) {
+    return fallback;
+  }
+  return values;
 }
 
 class ChildProcesses
@@ -843,6 +943,7 @@ private:
       config_file = ament_index_cpp::get_package_share_directory("autonomy_light") +
         "/config/point_lio_mid360.yaml";
     }
+    const auto target_to_point_lio_body = pointLioTargetToBodyTransform(config_file);
 
     auto command = std::vector<std::string>{
       "ros2", "run", "autonomy_light", "autonomy_light_pointlio_mapping",
@@ -852,7 +953,14 @@ private:
       "-p", "common.imu_topic:=" + raw_imu_topic_,
       "-p", "common.lidar_msg_type:=" + raw_lidar_msg_type_,
       "-p", "odom_header_frame_id:=" + odom_frame_,
-      "-p", "odom_child_frame_id:=" + lidar_frame_,
+      "-p", "odom_child_frame_id:=" + target_frame_,
+      "-p", "odom.child_to_body_T:=" + vectorParam(
+        {
+          target_to_point_lio_body.translation.x(),
+          target_to_point_lio_body.translation.y(),
+          target_to_point_lio_body.translation.z()
+        }),
+      "-p", "odom.child_to_body_R:=" + matrixParam(target_to_point_lio_body.rotation),
       "-p", "preprocess.lidar_type:=1",
       "-p", "preprocess.timestamp_unit:=3",
       "-p", "preprocess.scan_line:=4",
@@ -892,6 +1000,43 @@ private:
     return std::max(
       1.0,
       (grid_spec_.max_z - grid_spec_.min_z) + 2.0 * std::abs(target_to_lidar_translation_.z()) + 1.0);
+  }
+
+  RigidTransform pointLioTargetToBodyTransform(const std::string & config_file) const
+  {
+    const auto body_to_lidar_t = parseYamlVector(
+      config_file,
+      "extrinsic_T",
+      3,
+      {0.0, 0.0, 0.0});
+    const auto body_to_lidar_r = parseYamlVector(
+      config_file,
+      "extrinsic_R",
+      9,
+      {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0});
+
+    const tf2::Vector3 body_p_lidar(
+      body_to_lidar_t[0],
+      body_to_lidar_t[1],
+      body_to_lidar_t[2]);
+    const tf2::Matrix3x3 body_R_lidar(
+      body_to_lidar_r[0],
+      body_to_lidar_r[1],
+      body_to_lidar_r[2],
+      body_to_lidar_r[3],
+      body_to_lidar_r[4],
+      body_to_lidar_r[5],
+      body_to_lidar_r[6],
+      body_to_lidar_r[7],
+      body_to_lidar_r[8]);
+
+    // Point-LIO estimates the body/IMU pose, while user config describes target -> LiDAR.
+    // Its odom child correction expects target -> body.
+    RigidTransform target_to_body;
+    target_to_body.rotation = target_to_lidar_rotation_ * body_R_lidar.transpose();
+    target_to_body.translation =
+      target_to_lidar_translation_ - target_to_body.rotation * body_p_lidar;
+    return target_to_body;
   }
 
   void onLidarCloud(sensor_msgs::msg::PointCloud2::SharedPtr msg)
@@ -1829,28 +1974,10 @@ private:
 
   void onPointLioOdom(nav_msgs::msg::Odometry::SharedPtr msg)
   {
-    auto odom = *msg;
-    const bool input_pose_is_lidar = odom.child_frame_id == lidar_frame_;
-    if (input_pose_is_lidar) {
-      odom = targetOdomFromLidarOdom(odom);
-    } else if (!odom.child_frame_id.empty() && odom.child_frame_id != target_frame_) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(),
-        *get_clock(),
-        2000,
-        "Point-LIO odom child frame is '%s'; expected '%s' for correction or '%s' for legacy target odom",
-        odom.child_frame_id.c_str(),
-        lidar_frame_.c_str(),
-        target_frame_.c_str());
-      odom.child_frame_id = target_frame_;
-    } else {
-      odom.child_frame_id = target_frame_;
-    }
-
     {
       std::lock_guard<std::mutex> lock(odom_mutex_);
-      latest_odom_ = odom;
-      latest_point_lio_odom_pose_is_lidar_ = input_pose_is_lidar;
+      latest_odom_ = *msg;
+      latest_odom_.child_frame_id = target_frame_;
       has_odom_ = true;
     }
     last_odom_time_ = now();
@@ -1860,58 +1987,8 @@ private:
   void onPointLioPath(nav_msgs::msg::Path::SharedPtr msg)
   {
     if (path_pub_) {
-      bool input_pose_is_lidar = false;
-      {
-        std::lock_guard<std::mutex> lock(odom_mutex_);
-        input_pose_is_lidar = latest_point_lio_odom_pose_is_lidar_;
-      }
-      if (input_pose_is_lidar) {
-        auto path = *msg;
-        for (auto & pose : path.poses) {
-          pose.pose = targetPoseFromLidarPose(pose.pose);
-        }
-        path_pub_->publish(path);
-      } else {
-        path_pub_->publish(*msg);
-      }
+      path_pub_->publish(*msg);
     }
-  }
-
-  geometry_msgs::msg::Pose targetPoseFromLidarPose(
-    const geometry_msgs::msg::Pose & lidar_pose) const
-  {
-    tf2::Quaternion odom_q_lidar;
-    tf2::fromMsg(lidar_pose.orientation, odom_q_lidar);
-    odom_q_lidar.normalize();
-
-    tf2::Transform odom_to_lidar;
-    odom_to_lidar.setOrigin(
-      tf2::Vector3(
-        lidar_pose.position.x,
-        lidar_pose.position.y,
-        lidar_pose.position.z));
-    odom_to_lidar.setRotation(odom_q_lidar);
-
-    tf2::Transform target_to_lidar;
-    target_to_lidar.setOrigin(target_to_lidar_translation_);
-    target_to_lidar.setBasis(target_to_lidar_rotation_);
-
-    const tf2::Transform odom_to_target = odom_to_lidar * target_to_lidar.inverse();
-
-    geometry_msgs::msg::Pose target_pose;
-    target_pose.position.x = odom_to_target.getOrigin().x();
-    target_pose.position.y = odom_to_target.getOrigin().y();
-    target_pose.position.z = odom_to_target.getOrigin().z();
-    target_pose.orientation = tf2::toMsg(odom_to_target.getRotation());
-    return target_pose;
-  }
-
-  nav_msgs::msg::Odometry targetOdomFromLidarOdom(const nav_msgs::msg::Odometry & lidar_odom) const
-  {
-    auto target_odom = lidar_odom;
-    target_odom.child_frame_id = target_frame_;
-    target_odom.pose.pose = targetPoseFromLidarPose(lidar_odom.pose.pose);
-    return target_odom;
   }
 
   void publishLatest()
@@ -2190,7 +2267,6 @@ private:
   std::mutex odom_mutex_;
   nav_msgs::msg::Odometry latest_odom_;
   bool has_odom_{false};
-  bool latest_point_lio_odom_pose_is_lidar_{false};
   std::uint64_t lidar_count_{0};
   std::uint64_t odom_count_{0};
   std::uint64_t map_count_{0};
