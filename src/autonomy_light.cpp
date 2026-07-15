@@ -36,6 +36,7 @@
 #include <std_msgs/msg/string.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Transform.h>
 #include <tf2/LinearMath/Vector3.h>
 #if __has_include(<tf2_geometry_msgs/tf2_geometry_msgs.hpp>)
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -553,6 +554,7 @@ private:
   {
     tf2::Quaternion q;
     q.setRPY(target_to_lidar_rpy_[0], target_to_lidar_rpy_[1], target_to_lidar_rpy_[2]);
+    q.normalize();
     target_to_lidar_rotation_ = tf2::Matrix3x3(q);
     target_to_lidar_translation_ = tf2::Vector3(
       target_to_lidar_xyz_[0],
@@ -850,7 +852,7 @@ private:
       "-p", "common.imu_topic:=" + raw_imu_topic_,
       "-p", "common.lidar_msg_type:=" + raw_lidar_msg_type_,
       "-p", "odom_header_frame_id:=" + odom_frame_,
-      "-p", "odom_child_frame_id:=" + target_frame_,
+      "-p", "odom_child_frame_id:=" + lidar_frame_,
       "-p", "preprocess.lidar_type:=1",
       "-p", "preprocess.timestamp_unit:=3",
       "-p", "preprocess.scan_line:=4",
@@ -1827,10 +1829,28 @@ private:
 
   void onPointLioOdom(nav_msgs::msg::Odometry::SharedPtr msg)
   {
+    auto odom = *msg;
+    const bool input_pose_is_lidar = odom.child_frame_id == lidar_frame_;
+    if (input_pose_is_lidar) {
+      odom = targetOdomFromLidarOdom(odom);
+    } else if (!odom.child_frame_id.empty() && odom.child_frame_id != target_frame_) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(),
+        *get_clock(),
+        2000,
+        "Point-LIO odom child frame is '%s'; expected '%s' for correction or '%s' for legacy target odom",
+        odom.child_frame_id.c_str(),
+        lidar_frame_.c_str(),
+        target_frame_.c_str());
+      odom.child_frame_id = target_frame_;
+    } else {
+      odom.child_frame_id = target_frame_;
+    }
+
     {
       std::lock_guard<std::mutex> lock(odom_mutex_);
-      latest_odom_ = *msg;
-      latest_odom_.child_frame_id = target_frame_;
+      latest_odom_ = odom;
+      latest_point_lio_odom_pose_is_lidar_ = input_pose_is_lidar;
       has_odom_ = true;
     }
     last_odom_time_ = now();
@@ -1840,8 +1860,58 @@ private:
   void onPointLioPath(nav_msgs::msg::Path::SharedPtr msg)
   {
     if (path_pub_) {
-      path_pub_->publish(*msg);
+      bool input_pose_is_lidar = false;
+      {
+        std::lock_guard<std::mutex> lock(odom_mutex_);
+        input_pose_is_lidar = latest_point_lio_odom_pose_is_lidar_;
+      }
+      if (input_pose_is_lidar) {
+        auto path = *msg;
+        for (auto & pose : path.poses) {
+          pose.pose = targetPoseFromLidarPose(pose.pose);
+        }
+        path_pub_->publish(path);
+      } else {
+        path_pub_->publish(*msg);
+      }
     }
+  }
+
+  geometry_msgs::msg::Pose targetPoseFromLidarPose(
+    const geometry_msgs::msg::Pose & lidar_pose) const
+  {
+    tf2::Quaternion odom_q_lidar;
+    tf2::fromMsg(lidar_pose.orientation, odom_q_lidar);
+    odom_q_lidar.normalize();
+
+    tf2::Transform odom_to_lidar;
+    odom_to_lidar.setOrigin(
+      tf2::Vector3(
+        lidar_pose.position.x,
+        lidar_pose.position.y,
+        lidar_pose.position.z));
+    odom_to_lidar.setRotation(odom_q_lidar);
+
+    tf2::Transform target_to_lidar;
+    target_to_lidar.setOrigin(target_to_lidar_translation_);
+    target_to_lidar.setBasis(target_to_lidar_rotation_);
+
+    const tf2::Transform odom_to_target = odom_to_lidar * target_to_lidar.inverse();
+
+    geometry_msgs::msg::Pose target_pose;
+    target_pose.position.x = odom_to_target.getOrigin().x();
+    target_pose.position.y = odom_to_target.getOrigin().y();
+    target_pose.position.z = odom_to_target.getOrigin().z();
+    target_pose.orientation = tf2::toMsg(odom_to_target.getRotation());
+    return target_pose;
+  }
+
+  nav_msgs::msg::Odometry targetOdomFromLidarOdom(const nav_msgs::msg::Odometry & lidar_odom) const
+  {
+    auto target_odom = lidar_odom;
+    target_odom.child_frame_id = target_frame_;
+    target_odom.pose.pose = targetPoseFromLidarPose(lidar_odom.pose.pose);
+    return target_odom;
   }
 
   void publishLatest()
@@ -2120,6 +2190,7 @@ private:
   std::mutex odom_mutex_;
   nav_msgs::msg::Odometry latest_odom_;
   bool has_odom_{false};
+  bool latest_point_lio_odom_pose_is_lidar_{false};
   std::uint64_t lidar_count_{0};
   std::uint64_t odom_count_{0};
   std::uint64_t map_count_{0};
