@@ -2084,7 +2084,7 @@ private:
     msg.y_length = static_cast<float>(grid.spec.y_length);
 
     const auto count = static_cast<std::size_t>(grid.spec.width()) * grid.spec.height();
-    msg.data.assign(count, static_cast<float>(height_map_manual_value_));
+    msg.data.assign(count, -static_cast<float>(height_map_manual_value_));
     return msg;
   }
 
