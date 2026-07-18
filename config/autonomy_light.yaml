@@ -1,14 +1,14 @@
 autonomy_light:
   ros__parameters:
     # User-facing setup: pose of the Livox LiDAR frame in the target frame.
-    target_frame: "base_link"
-    height_map_frame: "base_link_gravity"
-    lidar_frame: "lidar_link"
-    target_to_lidar_xyz: [0.038335, 0.00162081, 0.138986]
-    target_to_lidar_rpy: [3.1416, 0.0, 0.0]
+    target_frame: "hd/base"
+    height_map_frame: "hd/base_link_gravity"
+    lidar_frame: "hd/front_lidar"
+    target_to_lidar_xyz: [0.234, 0.0, 0.077]
+    target_to_lidar_rpy: [0.0, 0.785398, 0.0]
 
     # User-facing setup: robot-centric elevation map geometry.
-    elevation_resolution: 0.05
+    elevation_resolution: 0.1
     elevation_x_length: 1.2
     elevation_y_length: 1.2
     height_origin:
@@ -58,6 +58,15 @@ autonomy_light:
     interpolation_max_passes: 2
     interpolation_min_neighbors: 3
     fill_remaining_height: 0.0
+    initial_floor_seed_fill:
+      # Startup-only seed for blind cells under/near the robot. It estimates floor
+      # height from the ROI side band and the ring just outside the ROI, then fills
+      # remaining unknown cells once before falling back to fill_remaining_height.
+      enabled: true
+      side_width: 0.20
+      search_margin: 0.40
+      cluster_band: 0.08
+      lower_fraction: 0.70
     algorithm:
       # robust: existing autonomy-light selector, autonomy_min_z: autonomy MinZElevationBackend style.
       elevation_backend: "autonomy_min_z"

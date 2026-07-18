@@ -119,11 +119,11 @@ struct GridSpec
   [[nodiscard]] double yMax() const { return y_center + 0.5 * y_length; }
   [[nodiscard]] std::uint32_t width() const
   {
-    return static_cast<std::uint32_t>(std::ceil(x_length / resolution));
+    return static_cast<std::uint32_t>(std::ceil((x_length / resolution) - 1.0e-9));
   }
   [[nodiscard]] std::uint32_t height() const
   {
-    return static_cast<std::uint32_t>(std::ceil(y_length / resolution));
+    return static_cast<std::uint32_t>(std::ceil((y_length / resolution) - 1.0e-9));
   }
 };
 
@@ -494,6 +494,29 @@ private:
       1,
       8);
     fill_remaining_height_ = declare_parameter<double>("fill_remaining_height", fill_remaining_height_);
+    initial_floor_seed_fill_enabled_ = declare_parameter<bool>(
+      "initial_floor_seed_fill.enabled", initial_floor_seed_fill_enabled_);
+    initial_floor_seed_side_width_ = std::max(
+      0.0,
+      declare_parameter<double>(
+        "initial_floor_seed_fill.side_width",
+        initial_floor_seed_side_width_));
+    initial_floor_seed_search_margin_ = std::max(
+      0.0,
+      declare_parameter<double>(
+        "initial_floor_seed_fill.search_margin",
+        initial_floor_seed_search_margin_));
+    initial_floor_seed_cluster_band_ = std::max(
+      1.0e-3,
+      declare_parameter<double>(
+        "initial_floor_seed_fill.cluster_band",
+        initial_floor_seed_cluster_band_));
+    initial_floor_seed_lower_fraction_ = std::clamp(
+      declare_parameter<double>(
+        "initial_floor_seed_fill.lower_fraction",
+        initial_floor_seed_lower_fraction_),
+      0.05,
+      1.0);
     elevation_backend_ = declare_parameter<std::string>(
       "algorithm.elevation_backend", elevation_backend_);
     clipping_enabled_ = declare_parameter<bool>("algorithm.clipping.enabled", clipping_enabled_);
@@ -1163,7 +1186,13 @@ private:
 
     std::vector<std::vector<float>> cell_samples(static_cast<std::size_t>(width) * height);
     std::vector<int> support_counts(static_cast<std::size_t>(width) * height, 0);
+    std::vector<float> startup_floor_seed_samples;
     std::size_t local_observed_cells = 0;
+    const bool initial_floor_seed_pending =
+      initial_floor_seed_fill_enabled_ && !initial_floor_seed_fill_applied_;
+    if (initial_floor_seed_pending && map_points) {
+      startup_floor_seed_samples.reserve(map_points->size());
+    }
 
     if (map_points) {
       for (const auto & point : *map_points) {
@@ -1174,10 +1203,14 @@ private:
         const double y = p_height.y();
         const double z = p_height.z();
 
-        if (x < x_min || x >= x_max || y < y_min || y >= y_max) {
+        const bool z_in_range = z >= grid.spec.min_z && z <= grid.spec.max_z;
+        if (!z_in_range) {
           continue;
         }
-        if (z < grid.spec.min_z || z > grid.spec.max_z) {
+        if (initial_floor_seed_pending && isInitialFloorSeedRegion(grid, x, y)) {
+          startup_floor_seed_samples.push_back(static_cast<float>(z));
+        }
+        if (x < x_min || x >= x_max || y < y_min || y >= y_max) {
           continue;
         }
 
@@ -1207,7 +1240,9 @@ private:
 
     const double local_coverage = localCoverage(local_observed_cells, grid.height.size());
     fillMissingFromRegisteredCells(grid, support_counts, registered_points, q_height_map, p_map_height_origin);
-    mergeWithPreviousGrid(grid, support_counts);
+    if (!initial_floor_seed_pending) {
+      mergeWithPreviousGrid(grid, support_counts);
+    }
     fillInitialFloorFromRegisteredCloud(
       grid,
       support_counts,
@@ -1216,13 +1251,15 @@ private:
       p_map_height_origin,
       local_coverage);
     ++filter_frame_count_;
-    applyHeightClipping(grid);
     applyIsolatedFilter(grid, support_counts);
     fillHoles(grid);
     applyBilateralFilter(grid);
     interpolateMissingCells(grid);
+    if (initial_floor_seed_pending) {
+      initial_floor_seed_fill_applied_ =
+        fillInitialMissingFromFloorSeed(grid, startup_floor_seed_samples);
+    }
     fillRemainingCells(grid);
-    applyHeightClipping(grid);
     return true;
   }
 
@@ -1421,21 +1458,6 @@ private:
         elevation_backend_.c_str());
     }
     return robustCellHeight(samples);
-  }
-
-  void applyHeightClipping(ElevationGrid & grid) const
-  {
-    if (!clipping_enabled_) {
-      return;
-    }
-
-    const auto min_z = static_cast<float>(std::min(clipping_min_z_, clipping_max_z_));
-    const auto max_z = static_cast<float>(std::max(clipping_min_z_, clipping_max_z_));
-    for (auto & height : grid.height) {
-      if (std::isfinite(height)) {
-        height = std::clamp(height, min_z, max_z);
-      }
-    }
   }
 
   void mergeWithPreviousGrid(ElevationGrid & grid, const std::vector<int> & support_counts)
@@ -1683,6 +1705,153 @@ private:
         grid.height[i] = latest_grid_.height[i];
       }
     }
+  }
+
+  bool isInitialFloorSeedRegion(
+    const ElevationGrid & grid,
+    const double x,
+    const double y) const
+  {
+    const double x_min = grid.spec.xMin();
+    const double x_max = grid.spec.xMax();
+    const double y_min = grid.spec.yMin();
+    const double y_max = grid.spec.yMax();
+    const double margin = std::max(initial_floor_seed_search_margin_, 0.0);
+    const double side_width = std::max(initial_floor_seed_side_width_, grid.spec.resolution);
+
+    const bool inside_roi = x >= x_min && x < x_max && y >= y_min && y < y_max;
+    const bool inside_expanded =
+      x >= (x_min - margin) && x < (x_max + margin) &&
+      y >= (y_min - margin) && y < (y_max + margin);
+    if (!inside_expanded) {
+      return false;
+    }
+    if (!inside_roi) {
+      return true;
+    }
+
+    return
+      (x - x_min) <= side_width ||
+      (x_max - x) <= side_width ||
+      (y - y_min) <= side_width ||
+      (y_max - y) <= side_width;
+  }
+
+  bool estimateInitialFloorSeed(std::vector<float> samples, float & seed_z) const
+  {
+    if (samples.empty()) {
+      return false;
+    }
+
+    std::sort(samples.begin(), samples.end());
+    const auto keep_count = std::max<std::size_t>(
+      1,
+      static_cast<std::size_t>(std::ceil(
+        initial_floor_seed_lower_fraction_ * static_cast<double>(samples.size()))));
+    samples.resize(std::min(keep_count, samples.size()));
+
+    if (samples.size() == 1) {
+      seed_z = samples.front();
+      return std::isfinite(seed_z);
+    }
+
+    const float min_z = samples.front();
+    const float max_z = samples.back();
+    const double bin_size = std::max(1.0e-3, initial_floor_seed_cluster_band_);
+    const auto bin_count = std::max<std::size_t>(
+      1,
+      static_cast<std::size_t>(std::ceil((max_z - min_z) / bin_size)) + 1);
+    std::vector<int> bins(bin_count, 0);
+    for (const auto z : samples) {
+      const auto bin = std::min(
+        bin_count - 1,
+        static_cast<std::size_t>(std::floor((z - min_z) / bin_size)));
+      ++bins[bin];
+    }
+
+    std::size_t best_bin = 0;
+    int best_count = bins.front();
+    for (std::size_t i = 1; i < bins.size(); ++i) {
+      if (bins[i] > best_count) {
+        best_bin = i;
+        best_count = bins[i];
+      }
+    }
+
+    const float bin_center = min_z + static_cast<float>(best_bin) * static_cast<float>(bin_size);
+    std::vector<float> cluster;
+    cluster.reserve(samples.size());
+    for (const auto z : samples) {
+      if (std::abs(z - bin_center) <= initial_floor_seed_cluster_band_) {
+        cluster.push_back(z);
+      }
+    }
+
+    seed_z = cluster.empty() ? medianValue(std::move(samples)) : medianValue(std::move(cluster));
+    return std::isfinite(seed_z);
+  }
+
+  bool fillInitialMissingFromFloorSeed(
+    ElevationGrid & grid,
+    const std::vector<float> & startup_floor_seed_samples) const
+  {
+    const int width = static_cast<int>(grid.spec.width());
+    const int height = static_cast<int>(grid.spec.height());
+    if (width <= 0 || height <= 0 || grid.height.empty()) {
+      return false;
+    }
+
+    std::vector<float> fallback_grid_samples;
+    std::size_t missing_count = 0;
+    fallback_grid_samples.reserve(grid.height.size());
+    for (int row = 0; row < height; ++row) {
+      for (int col = 0; col < width; ++col) {
+        const auto index = static_cast<std::size_t>(row) * width + col;
+        if (index >= grid.height.size()) {
+          continue;
+        }
+
+        const float value = grid.height[index];
+        if (!std::isfinite(value)) {
+          ++missing_count;
+          continue;
+        }
+
+        fallback_grid_samples.push_back(value);
+      }
+    }
+
+    if (missing_count == 0) {
+      return true;
+    }
+
+    float seed_z = std::numeric_limits<float>::quiet_NaN();
+    std::vector<float> seed_samples = startup_floor_seed_samples;
+    const char * source_name = "side-ring";
+    if (!estimateInitialFloorSeed(std::move(seed_samples), seed_z)) {
+      source_name = "observed-grid";
+      if (!estimateInitialFloorSeed(std::move(fallback_grid_samples), seed_z)) {
+        RCLCPP_WARN(
+          get_logger(),
+          "Initial floor seed fill skipped: no startup side-ring or observed-grid height samples.");
+        return false;
+      }
+    }
+
+    for (auto & height_value : grid.height) {
+      if (!std::isfinite(height_value)) {
+        height_value = seed_z;
+      }
+    }
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Initial floor seed fill seeded %zu missing cell(s) with z=%.3f from %zu %s sample(s).",
+      missing_count,
+      static_cast<double>(seed_z),
+      startup_floor_seed_samples.empty() ? fallback_grid_samples.size() : startup_floor_seed_samples.size(),
+      source_name);
+    return true;
   }
 
   void interpolateMissingCells(ElevationGrid & grid) const
@@ -2027,7 +2196,7 @@ private:
     grid.header.frame_id = height_map_frame_;
     grid.height.assign(
       static_cast<std::size_t>(grid.spec.width()) * grid.spec.height(),
-      static_cast<float>(height_map_manual_value_));
+      -static_cast<float>(height_map_manual_value_));
     return grid;
   }
 
@@ -2084,7 +2253,7 @@ private:
     msg.y_length = static_cast<float>(grid.spec.y_length);
 
     const auto count = static_cast<std::size_t>(grid.spec.width()) * grid.spec.height();
-    msg.data.assign(count, -static_cast<float>(height_map_manual_value_));
+    msg.data.assign(count, static_cast<float>(height_map_manual_value_));
     return msg;
   }
 
@@ -2196,6 +2365,12 @@ private:
   int interpolation_max_passes_{8};
   int interpolation_min_neighbors_{1};
   double fill_remaining_height_{0.0};
+  bool initial_floor_seed_fill_enabled_{true};
+  bool initial_floor_seed_fill_applied_{false};
+  double initial_floor_seed_side_width_{0.20};
+  double initial_floor_seed_search_margin_{0.40};
+  double initial_floor_seed_cluster_band_{0.08};
+  double initial_floor_seed_lower_fraction_{0.70};
   std::string elevation_backend_{"robust"};
   bool clipping_enabled_{false};
   double clipping_min_z_{-std::numeric_limits<double>::infinity()};

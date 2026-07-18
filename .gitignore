@@ -1,2 +1,15 @@
 third_party/Livox-SDK2/
 dist/
+
+# Local build artifacts
+build/
+install/
+log/
+
+# Python cache artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
