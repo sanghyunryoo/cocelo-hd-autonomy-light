@@ -21,6 +21,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(PCL REQUIRED COMPONENTS common io)
 find_package(PythonLibs REQUIRED)
 find_package(OpenMP QUIET)
 
@@ -57,6 +58,11 @@ ament_target_dependencies(autonomy_light_node
   tf2_ros
 )
 
+target_include_directories(autonomy_light_node
+  PRIVATE
+    ${PCL_INCLUDE_DIRS}
+)
+
 if(COMMAND rosidl_get_typesupport_target)
   rosidl_get_typesupport_target(cpp_typesupport_target
     ${PROJECT_NAME}
@@ -69,6 +75,10 @@ else()
     "rosidl_typesupport_cpp"
   )
 endif()
+
+target_link_libraries(autonomy_light_node
+  ${PCL_LIBRARIES}
+)
 
 set(POINT_LIO_VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/point_lio_ros2")
 add_executable(autonomy_light_pointlio_mapping
@@ -128,6 +138,7 @@ install(DIRECTORY config
 install(PROGRAMS
   build.sh
   launch.sh
+  mapping.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 

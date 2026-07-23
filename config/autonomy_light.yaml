@@ -1,11 +1,18 @@
 autonomy_light:
   ros__parameters:
-    # User-facing setup: pose of the Livox LiDAR frame in the target frame.
+    # Frames and LiDAR poses.
     target_frame: "base_link"
     height_map_frame: "base_link_gravity"
     lidar_frame: "lidar_link"
+    lidar2_frame: "lidar2_link"
+
+    # LiDAR 1 pose in target_frame. Used directly in the single-LiDAR path.
     target_to_lidar_xyz: [0.038335, 0.00162081, 0.138986]
     target_to_lidar_rpy: [3.1416, 0.0, 0.0]
+
+    # LiDAR 2 pose in target_frame. Used only when raw_lidar2_topic is set.
+    target_to_lidar2_xyz: [0.038335, 0.00162081, 0.138986]
+    target_to_lidar2_rpy: [3.1416, 0.0, 0.0]
 
     # User-facing setup: robot-centric elevation map geometry.
     elevation_resolution: 0.025
@@ -23,6 +30,15 @@ autonomy_light:
       floor_min_points: 20
     publish_rate_hz: 50.0
 
+    # Offline mapping mode. Normally leave these false/default and use
+    # ./mapping.sh, which overrides them at runtime.
+    mapping_only: false
+    point_lio_pcd_save_en: false
+    point_lio_pcd_save_interval: -1
+    child_shutdown_grace_sec: 0.8
+    saved_map_file: ""
+    saved_map_frame: "odom"
+
     # ROS 2 domain split: keep heavy perception internal, publish only control-facing
     # outputs on the external domain. Set debug_local_map_ros_domain_id to the
     # internal domain to keep local_map private, or to the external domain to view it there.
@@ -31,16 +47,43 @@ autonomy_light:
     debug_local_map_ros_domain_id: 17
     debug_local_map_topic: "/point_lio/local_map"
     
-    # Optional defaults for Livox MID360/MID360s + Point-LIO integration.
-    # Can be overridden at runtime with ./launch.sh --mid360 or --mid360s.
+    # Livox driver setup.
     livox_model: "mid360"
+
+    # LiDAR 1: default single-LiDAR path. For one physical LiDAR, only these
+    # fields need to be set.
     livox_interface: "eno1"
     livox_host_ip: "192.168.1.50/24" 
     livox_lidar_ip: "192.168.1.166"
+
+    # LiDAR 2: optional. Set livox_lidar2_ip to start a second Livox driver.
+    # If LiDAR 2 is connected through USB-to-Ethernet, put that interface here
+    # and give it a different host IP such as 192.168.2.50/24.
+    # Leave livox_lidar2_ip empty to keep the existing single-LiDAR behavior.
+    livox2_interface: ""
+    livox_lidar2_ip: ""
+    livox_host2_ip: ""
+
+    # Raw Livox topics.
+    # - Single LiDAR keeps the existing Livox topics: livox/lidar, livox/imu.
+    # - When livox_lidar2_ip is set, launch.sh automatically uses /livox1/*
+    #   and /livox2/* unless these topics are explicitly overridden.
+    # - Point-LIO always uses LiDAR 1 IMU; LiDAR 2 IMU is exposed only for
+    #   inspection/debugging.
     raw_lidar_topic: "livox/lidar"
+    raw_lidar2_topic: ""
     raw_lidar_msg_type: "livox_custom"
     raw_imu_topic: "livox/imu"
+    raw_imu2_topic: "/livox2/imu"
     monitor_raw_lidar: false
+
+    # Two-LiDAR merge output. Enabled only when raw_lidar2_topic is non-empty.
+    # Both clouds are transformed into target_frame before Point-LIO sees them.
+    merged_lidar_topic: "/autonomy_light/merged_lidar"
+    lidar_merge:
+      sync_tolerance: 0.005
+      max_queue_size: 8
+      publish_lidar1_on_sync_miss: false
     point_lio_odom_topic: "/aft_mapped_to_init"
     point_lio_map_topic: "/point_lio/local_map"
     point_lio_path_topic: "/path"
