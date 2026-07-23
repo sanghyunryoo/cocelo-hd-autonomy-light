@@ -82,9 +82,12 @@ autonomy_light:
         supported_min_enabled: true
         support_band: 0.04
         obstacle_override_enabled: true
-        obstacle_min_height: 0.06
-        obstacle_min_points: 2
+        obstacle_min_height: 0.035
+        obstacle_min_points: 1
         obstacle_support_band: 0.06
+        # Project only obstacle tops into the neighboring height-map cells so
+        # Point-LIO's coarser local-map voxels still produce a continuous edge.
+        obstacle_projection_radius_cells: 1
       cloud_registered_fill:
         enabled: false
         percentile: 0.15

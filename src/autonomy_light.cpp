@@ -545,6 +545,11 @@ private:
     min_z_obstacle_support_band_ = std::max(
       0.0,
       declare_parameter<double>("algorithm.min_z.obstacle_support_band", min_z_obstacle_support_band_));
+    min_z_obstacle_projection_radius_cells_ = std::max(
+      0,
+      static_cast<int>(declare_parameter<int>(
+        "algorithm.min_z.obstacle_projection_radius_cells",
+        min_z_obstacle_projection_radius_cells_)));
     cloud_registered_fill_enabled_ = declare_parameter<bool>(
       "algorithm.cloud_registered_fill.enabled", cloud_registered_fill_enabled_);
     cloud_registered_fill_percentile_ = std::clamp(
@@ -1240,13 +1245,17 @@ private:
         continue;
       }
       const auto cell = selectGroundCellHeight(cell_samples[index]);
+      const std::uint32_t row = static_cast<std::uint32_t>(index / width);
+      const std::uint32_t col = static_cast<std::uint32_t>(index % width);
+      const auto obstacle = selectObstacleCellHeight(cell_samples[index]);
+      if (std::isfinite(obstacle.height)) {
+        projectObstacleCandidate(obstacle_candidates, width, height, row, col, obstacle);
+      }
       if (!std::isfinite(cell.height)) {
-        obstacle_candidates[index] = selectObstacleCellHeight(cell_samples[index]);
         continue;
       }
       grid.height[index] = cell.height;
       support_counts[index] = cell.support_count;
-      obstacle_candidates[index] = selectObstacleCellHeight(cell_samples[index]);
       ++local_observed_cells;
     }
 
@@ -1474,13 +1483,57 @@ private:
         continue;
       }
 
-      float sum = 0.0F;
-      for (auto it = support_begin; it != std::next(candidate); ++it) {
-        sum += *it;
-      }
-      return {sum / static_cast<float>(support_count), support_count};
+      return {*candidate, support_count};
     }
     return {};
+  }
+
+  static void retainHigherObstacle(
+    std::vector<CellHeight> & obstacle_candidates,
+    const std::size_t index,
+    const CellHeight & obstacle)
+  {
+    if (index >= obstacle_candidates.size() || !std::isfinite(obstacle.height)) {
+      return;
+    }
+    auto & current = obstacle_candidates[index];
+    if (!std::isfinite(current.height) || obstacle.height > current.height) {
+      current = obstacle;
+    }
+  }
+
+  void projectObstacleCandidate(
+    std::vector<CellHeight> & obstacle_candidates,
+    const std::uint32_t width,
+    const std::uint32_t height,
+    const std::uint32_t row,
+    const std::uint32_t col,
+    const CellHeight & obstacle) const
+  {
+    const int radius = min_z_obstacle_projection_radius_cells_;
+    const int row_i = static_cast<int>(row);
+    const int col_i = static_cast<int>(col);
+    const int width_i = static_cast<int>(width);
+    const int height_i = static_cast<int>(height);
+    const int radius2 = radius * radius;
+
+    for (int dy = -radius; dy <= radius; ++dy) {
+      const int nr = row_i + dy;
+      if (nr < 0 || nr >= height_i) {
+        continue;
+      }
+      for (int dx = -radius; dx <= radius; ++dx) {
+        if (dx * dx + dy * dy > radius2) {
+          continue;
+        }
+        const int nc = col_i + dx;
+        if (nc < 0 || nc >= width_i) {
+          continue;
+        }
+        const auto index = static_cast<std::size_t>(nr) * width + static_cast<std::size_t>(nc);
+        retainHigherObstacle(obstacle_candidates, index, obstacle);
+      }
+    }
   }
 
   void overlayObstacleCandidates(
@@ -2437,6 +2490,7 @@ private:
   double min_z_obstacle_min_height_{0.06};
   int min_z_obstacle_min_points_{2};
   double min_z_obstacle_support_band_{0.06};
+  int min_z_obstacle_projection_radius_cells_{1};
   bool cloud_registered_fill_enabled_{true};
   double cloud_registered_fill_percentile_{0.15};
   int cloud_registered_fill_min_points_per_cell_{2};
