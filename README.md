@@ -226,8 +226,8 @@ Commonly changed parameters in `config/autonomy_light.yaml`:
 | `livox_model` | `mid360` | Livox model for generated driver config. Override with `--mid360` or `--mid360s`. |
 | `algorithm.elevation_backend` | `autonomy_min_z` | Cell selector matching the autonomy min-z style. |
 | `algorithm.clipping.min_z` / `max_z` | `0.0` / `0.48` | Output height clamp range. |
-| `algorithm.min_z.min_points_per_cell` | `3` | Minimum point support for a cell. |
-| `algorithm.min_z.obstacle_override_enabled` | `true` | Allows supported obstacle clusters to override floor min-z. |
+| `algorithm.min_z.min_points_per_cell` | `3` | Minimum support for the smooth terrain layer. |
+| `algorithm.min_z.obstacle_override_enabled` | `true` | Overlays sparse supported obstacle clusters after terrain filtering. |
 | `algorithm.isolated_filter.*` | see config | Removes isolated random cell noise. |
 
 Full input/output and tuning documentation:

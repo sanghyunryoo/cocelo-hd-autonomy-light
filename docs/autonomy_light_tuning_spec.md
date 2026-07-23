@@ -456,10 +456,10 @@ height map 최종값을 범위 안으로 자를지 여부다. 현재값: `true`.
 
 ### `algorithm.min_z.min_points_per_cell`
 
-cell 대표값을 채택하기 위한 최소 point 수다. 현재값: `3`.
+terrain layer의 낮은 표면 cluster를 채택하기 위한 최소 point 수다. 현재값: `3`.
 
-- 올리면 노이즈가 줄지만 장애물/얇은 물체 반응이 늦어진다.
-- 낮추면 반응은 빠르지만 지지직거리는 단발 노이즈가 늘 수 있다.
+- 올려도 `obstacle_min_points`를 만족하는 위쪽 obstacle layer는 별도로 유지된다.
+- 따라서 이 값은 희소 장애물이 아니라 지면 평탄화 강도만 조절한다.
 
 ### `algorithm.min_z.supported_min_enabled`
 
@@ -476,9 +476,10 @@ cell 대표값을 채택하기 위한 최소 point 수다. 현재값: `3`.
 
 ### `algorithm.min_z.obstacle_override_enabled`
 
-cell 안에 바닥보다 충분히 높은 cluster가 있으면 장애물로 우선 선택할지 여부다. 현재값: `true`.
+cell 안의 높은 표면 cluster를 별도 obstacle layer로 유지할지 여부다. 현재값: `true`.
 
-- supported min-z가 바닥만 계속 고르는 문제를 보완한다.
+- terrain은 먼저 temporal/bilateral filtering하고, obstacle layer는 그 뒤에 overlay한다.
+- 따라서 평지 노이즈는 줄이면서 턱과 장애물 edge는 평활화되지 않는다.
 
 ### `algorithm.min_z.obstacle_min_height`
 
@@ -568,11 +569,11 @@ floor 후보 cluster를 묶는 z 폭이다.
 
 ### `algorithm.frame_aggregation.temporal_alpha`
 
-현재값과 이전값을 섞는 비율이다. 현재값: `1.0`.
+현재 terrain 값과 이전 terrain 값을 섞는 비율이다. 현재값: `0.70`.
 
-- `1.0`: 현재값만 사용한다. 반응이 빠르다.
-- 낮출수록 smoothing은 강하지만 장애물 반응과 사라짐이 늦어진다.
-- 장애물 잔상을 줄이고 싶으면 먼저 `1.0`을 유지한다.
+- `1.0`: 현재 terrain만 사용한다. 반응이 빠르다.
+- 낮출수록 terrain smoothing은 강해진다.
+- obstacle layer에는 적용되지 않으므로 obstacle edge의 잔상은 만들지 않는다.
 
 ## 16. Isolated Filter
 
@@ -639,11 +640,10 @@ height 차이 가중치 sigma다.
 
 ### `algorithm.bilateral.passes`
 
-bilateral filter 반복 횟수다. 현재값: `0`.
+terrain에만 적용하는 bilateral filter 반복 횟수다. 현재값: `1`.
 
 - 0이면 꺼짐.
-- 노이즈가 남으면 1부터 테스트한다.
-- edge가 무뎌지면 다시 0으로 둔다.
+- obstacle은 overlay 이후 합성되므로 이 필터로 edge가 무뎌지지 않는다.
 
 ### `algorithm.bilateral.every_n_frames`
 

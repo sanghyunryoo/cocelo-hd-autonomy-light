@@ -1263,7 +1263,7 @@ private:
       p_map_height_origin,
       local_coverage);
     ++filter_frame_count_;
-    applyIsolatedFilter(grid, support_counts);
+    applyIsolatedFilter(grid);
     fillHoles(grid);
     applyBilateralFilter(grid);
     interpolateMissingCells(grid);
@@ -1535,7 +1535,7 @@ private:
     }
   }
 
-  void applyIsolatedFilter(ElevationGrid & grid, const std::vector<int> & support_counts) const
+  void applyIsolatedFilter(ElevationGrid & grid) const
   {
     if (
       isolated_filter_radius_ <= 0 ||
