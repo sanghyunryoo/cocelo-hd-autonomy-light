@@ -1,16 +1,16 @@
 autonomy_light:
   ros__parameters:
     # User-facing setup: pose of the Livox LiDAR frame in the target frame.
-    target_frame: "hd/base"
-    height_map_frame: "hd/base_link_gravity"
-    lidar_frame: "hd/front_lidar"
-    target_to_lidar_xyz: [0.234, 0.0, 0.077]
-    target_to_lidar_rpy: [0.0, 0.785398, 0.0]
+    target_frame: "base_link"
+    height_map_frame: "base_link_gravity"
+    lidar_frame: "lidar_link"
+    target_to_lidar_xyz: [0.038335, 0.00162081, 0.138986]
+    target_to_lidar_rpy: [3.1416, 0.0, 0.0]
 
     # User-facing setup: robot-centric elevation map geometry.
-    elevation_resolution: 0.1
-    elevation_x_length: 1.2
-    elevation_y_length: 1.2
+    elevation_resolution: 0.025
+    elevation_x_length: 1.6
+    elevation_y_length: 0.8
     height_origin:
       # local_floor keeps the height map from riding on small odom z jitter caused by roll/pitch.
       # Use odom for the old behavior, or fixed for a map-level z origin.
@@ -27,8 +27,8 @@ autonomy_light:
     # outputs on the external domain. Set debug_local_map_ros_domain_id to the
     # internal domain to keep local_map private, or to the external domain to view it there.
     internal_ros_domain_id: 0
-    external_ros_domain_id: 34
-    debug_local_map_ros_domain_id: 42
+    external_ros_domain_id: 17
+    debug_local_map_ros_domain_id: 17
     debug_local_map_topic: "/point_lio/local_map"
     
     # Optional defaults for Livox MID360/MID360s + Point-LIO integration.
@@ -36,10 +36,10 @@ autonomy_light:
     livox_model: "mid360"
     livox_interface: "eno1"
     livox_host_ip: "192.168.1.50/24" 
-    livox_lidar_ip: "192.168.1.190"
-    raw_lidar_topic: "f16/livox/lidar"
+    livox_lidar_ip: "192.168.1.166"
+    raw_lidar_topic: "livox/lidar"
     raw_lidar_msg_type: "livox_custom"
-    raw_imu_topic: "f16/livox/imu"
+    raw_imu_topic: "livox/imu"
     monitor_raw_lidar: false
     point_lio_odom_topic: "/aft_mapped_to_init"
     point_lio_map_topic: "/point_lio/local_map"
