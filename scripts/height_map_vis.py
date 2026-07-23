@@ -80,7 +80,7 @@ def message_to_image(msg, raw_distance):
     else:
         display = np.nanmax(values[finite]) - values
 
-    display = np.flipud(display.T)
+    display = np.flipud(np.fliplr(display.T))
     low = float(np.nanmin(display))
     high = float(np.nanmax(display))
     span = max(1.0e-6, high - low)
@@ -104,7 +104,7 @@ def draw_overlay(image, text):
     )
     cv2.putText(
         image,
-        "+x forward up, obstacle bright",
+        "+x forward up, +y left, obstacle bright",
         (8, 38),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.45,
