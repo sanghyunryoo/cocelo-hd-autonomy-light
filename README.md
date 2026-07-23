@@ -36,6 +36,7 @@ Then run:
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
 ./launch.sh --real --mid360
+./launch.sh --real --mid360 --vis
 # or
 ./launch.sh --real --mid360s
 ```

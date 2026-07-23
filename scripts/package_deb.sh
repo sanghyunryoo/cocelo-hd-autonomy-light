@@ -531,7 +531,7 @@ Section: robotics
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Cocelo <todo@example.com>
-Depends: bash, sudo, iproute2, python3
+Depends: bash, sudo, iproute2, python3, python3-numpy, python3-opencv
 Description: Cocelo autonomy-light runtime
  Source-free runtime bundle for Livox MID360/MID360s driver, Point-LIO mapping, and
  control-facing autonomy-light height map outputs. This package assumes ROS 2

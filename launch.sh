@@ -4,13 +4,14 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  launch.sh [--real|--sim] [--no-drivers] [options] [-- <extra ros args>]
+  launch.sh [--real|--sim] [--no-drivers] [--vis] [options] [-- <extra ros args>]
 
 Modes:
   --real              Real robot mode. Starts Livox driver and Point-LIO. Default.
   --sim               Simulation mode. Does not start Livox driver, uses sim time,
                       and reads simulated /<prefix>/livox/lidar + /<prefix>/livox/imu.
   --no-drivers        Start autonomy_light only; disables both Livox driver and Point-LIO.
+  --vis               Start a lightweight 50Hz OpenCV height-map viewer.
 
 Options:
   --config FILE       Override config yaml.
@@ -33,9 +34,13 @@ Options:
   --ros-distro NAME   ROS distro. Default: ROS_DISTRO or auto-detected /opt/ros.
   --skip-livox-network
                       Do not configure Livox host network/config.
+  --vis-topic TOPIC   HeightMap topic for --vis. Default: /autonomy_light/height_map_data.
+  --vis-fps HZ        Viewer refresh rate. Default: 50.
+  --vis-scale SCALE   Viewer nearest-neighbor pixel scale. Default: 10.
 
 Examples:
   ./launch.sh --real
+  ./launch.sh --real --vis
   ./launch.sh --real --mid360
   ./launch.sh --real --mid360s
   ./launch.sh --sim
@@ -53,6 +58,11 @@ CALLER_WORKSPACE_DIR="$(pwd)"
 ROS_DISTRO_NAME="${ROS_DISTRO:-}"
 MODE="real"
 NO_DRIVERS="false"
+VIS="false"
+VIS_TOPIC="${AUTONOMY_LIGHT_VIS_TOPIC:-/autonomy_light/height_map_data}"
+VIS_FPS="${AUTONOMY_LIGHT_VIS_FPS:-50}"
+VIS_SCALE="${AUTONOMY_LIGHT_VIS_SCALE:-10}"
+VIS_ROS_DOMAIN_ID="${AUTONOMY_LIGHT_VIS_ROS_DOMAIN_ID:-}"
 SIM_TOPIC_PREFIX="${AUTONOMY_LIGHT_SIM_TOPIC_PREFIX-/f4}"
 RAW_LIDAR_TOPIC=""
 RAW_IMU_TOPIC=""
@@ -91,6 +101,34 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-drivers)
       NO_DRIVERS="true"
+      shift
+      ;;
+    --vis)
+      VIS="true"
+      shift
+      ;;
+    --vis-topic)
+      VIS_TOPIC="${2:?--vis-topic requires a topic}"
+      shift 2
+      ;;
+    --vis-topic=*)
+      VIS_TOPIC="${1#--vis-topic=}"
+      shift
+      ;;
+    --vis-fps)
+      VIS_FPS="${2:?--vis-fps requires a rate}"
+      shift 2
+      ;;
+    --vis-fps=*)
+      VIS_FPS="${1#--vis-fps=}"
+      shift
+      ;;
+    --vis-scale)
+      VIS_SCALE="${2:?--vis-scale requires a positive integer}"
+      shift 2
+      ;;
+    --vis-scale=*)
+      VIS_SCALE="${1#--vis-scale=}"
       shift
       ;;
     --config)
@@ -319,6 +357,37 @@ params = ((data.get("autonomy_light") or {}).get("ros__parameters")) or {}
 domain = params.get("internal_ros_domain_id", os.environ.get("ROS_DOMAIN_ID", "0"))
 print("" if domain is None else str(domain).strip())
 PY
+}
+
+read_external_ros_domain_config() {
+  local config_file="$1"
+  /usr/bin/python3 - "${config_file}" <<'PY'
+import os
+import sys
+
+import yaml
+
+with open(sys.argv[1], "r", encoding="utf-8") as stream:
+    data = yaml.safe_load(stream) or {}
+
+params = ((data.get("autonomy_light") or {}).get("ros__parameters")) or {}
+fallback = params.get("internal_ros_domain_id", os.environ.get("ROS_DOMAIN_ID", "0"))
+domain = params.get("external_ros_domain_id", fallback)
+print("" if domain is None else str(domain).strip())
+PY
+}
+
+height_map_vis_script() {
+  if [[ -x "${SCRIPT_DIR}/scripts/height_map_vis.py" ]]; then
+    echo "${SCRIPT_DIR}/scripts/height_map_vis.py"
+    return
+  fi
+  if [[ -x "${SCRIPT_DIR}/height_map_vis.py" ]]; then
+    echo "${SCRIPT_DIR}/height_map_vis.py"
+    return
+  fi
+  echo "error: height_map_vis.py not found next to launch.sh or in scripts/." >&2
+  exit 1
 }
 
 effective_config_path() {
@@ -659,7 +728,40 @@ if [[ "${MODE}" == "sim" ]]; then
   echo "simulation topics: lidar=${RAW_LIDAR_TOPIC} imu=${RAW_IMU_TOPIC}"
 fi
 
-exec ros2 run autonomy_light autonomy_light \
-  --ros-args \
-  --params-file "${EFFECTIVE_CONFIG_FILE}" \
+AUTONOMY_LIGHT_COMMAND=(
+  ros2 run autonomy_light autonomy_light
+  --ros-args
+  --params-file "${EFFECTIVE_CONFIG_FILE}"
   "$@"
+)
+
+if [[ "${VIS}" != "true" ]]; then
+  exec "${AUTONOMY_LIGHT_COMMAND[@]}"
+fi
+
+VIS_SCRIPT="$(height_map_vis_script)"
+if [[ -z "${VIS_ROS_DOMAIN_ID}" ]]; then
+  VIS_ROS_DOMAIN_ID="$(read_external_ros_domain_config "${EFFECTIVE_CONFIG_FILE}")"
+fi
+
+cleanup() {
+  local pid
+  for pid in "${AUTONOMY_LIGHT_PID:-}" "${VIS_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
+      kill "${pid}" >/dev/null 2>&1 || true
+    fi
+  done
+}
+trap cleanup EXIT INT TERM
+
+"${AUTONOMY_LIGHT_COMMAND[@]}" &
+AUTONOMY_LIGHT_PID="$!"
+
+echo "height-map vis: topic=${VIS_TOPIC} fps=${VIS_FPS} scale=${VIS_SCALE} ROS_DOMAIN_ID=${VIS_ROS_DOMAIN_ID}"
+(
+  export ROS_DOMAIN_ID="${VIS_ROS_DOMAIN_ID}"
+  exec "${VIS_SCRIPT}" --topic "${VIS_TOPIC}" --fps "${VIS_FPS}" --scale "${VIS_SCALE}"
+) &
+VIS_PID="$!"
+
+wait "${AUTONOMY_LIGHT_PID}"

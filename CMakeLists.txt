@@ -131,7 +131,9 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(PROGRAMS scripts/find_mid360_ip.py
+install(PROGRAMS
+  scripts/find_mid360_ip.py
+  scripts/height_map_vis.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
