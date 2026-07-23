@@ -57,6 +57,7 @@ autonomy_light:
       manual_value: 0.48
     interpolation_max_passes: 2
     interpolation_min_neighbors: 3
+    interpolation_max_height_diff: 0.015
     fill_remaining_height: 0.0
     initial_floor_seed_fill:
       # Startup-only seed for blind cells under/near the robot. It estimates floor
@@ -75,6 +76,8 @@ autonomy_light:
         min_z: 0.0
         max_z: 0.48
       min_z:
+        # Terrain requires a denser lower-surface cluster.  Sparse top-surface
+        # returns are independently retained as obstacles after terrain filtering.
         min_points_per_cell: 3
         supported_min_enabled: true
         support_band: 0.04
@@ -96,9 +99,12 @@ autonomy_light:
         intra_cell_min_support_gap: 0.025
         intra_cell_min_support_count: 3
         edge_mix_height_diff: 0.035
-        edge_prefer_prev_support_count: 1
+        edge_prefer_prev_support_count: 0
+        fill_missing_from_previous_grid: false
         cell_height_percentile: 0.15
-        temporal_alpha: 1.0
+        # Applied only to terrain; obstacle candidates are overlaid afterwards so
+        # their edges do not leave temporal or spatial smoothing tails.
+        temporal_alpha: 0.70
       isolated_filter:
         radius: 1
         min_support_neighbors: 3
@@ -114,8 +120,8 @@ autonomy_light:
         sigma_spatial: 1.1
         sigma_height: 0.015
         max_height_diff: 0.025
-        passes: 0
-        every_n_frames: 2
+        passes: 1
+        every_n_frames: 1
     start_lidar_driver: true
     start_point_lio: true
     child_use_sim_time: false

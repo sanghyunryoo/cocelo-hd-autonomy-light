@@ -493,6 +493,8 @@ private:
         "interpolation_min_neighbors", interpolation_min_neighbors_)),
       1,
       8);
+    interpolation_max_height_diff_ = declare_parameter<double>(
+      "interpolation_max_height_diff", interpolation_max_height_diff_);
     fill_remaining_height_ = declare_parameter<double>("fill_remaining_height", fill_remaining_height_);
     initial_floor_seed_fill_enabled_ = declare_parameter<bool>(
       "initial_floor_seed_fill.enabled", initial_floor_seed_fill_enabled_);
@@ -591,10 +593,13 @@ private:
     edge_mix_height_diff_ = declare_parameter<double>(
       "algorithm.frame_aggregation.edge_mix_height_diff", edge_mix_height_diff_);
     edge_prefer_prev_support_count_ = std::max(
-      1,
+      0,
       static_cast<int>(declare_parameter<int>(
         "algorithm.frame_aggregation.edge_prefer_prev_support_count",
         edge_prefer_prev_support_count_)));
+    fill_missing_from_previous_grid_ = declare_parameter<bool>(
+      "algorithm.frame_aggregation.fill_missing_from_previous_grid",
+      fill_missing_from_previous_grid_);
     cell_height_percentile_ = std::clamp(
       declare_parameter<double>("algorithm.frame_aggregation.cell_height_percentile", cell_height_percentile_),
       0.0,
@@ -668,6 +673,7 @@ private:
     }
 
     latest_grid_ = ElevationGrid(grid_spec_);
+    latest_ground_grid_ = ElevationGrid(grid_spec_);
   }
 
   std::vector<double> declareVectorParameter(
@@ -1186,6 +1192,10 @@ private:
 
     std::vector<std::vector<float>> cell_samples(static_cast<std::size_t>(width) * height);
     std::vector<int> support_counts(static_cast<std::size_t>(width) * height, 0);
+    // Keep obstacle candidates separate from the terrain grid.  Terrain is allowed
+    // to be spatially/temporally filtered; obstacle candidates are overlaid only
+    // after those filters so a small step is never averaged into its surroundings.
+    std::vector<CellHeight> obstacle_candidates(static_cast<std::size_t>(width) * height);
     std::vector<float> startup_floor_seed_samples;
     std::size_t local_observed_cells = 0;
     const bool initial_floor_seed_pending =
@@ -1229,12 +1239,14 @@ private:
       if (cell_samples[index].empty()) {
         continue;
       }
-      const auto cell = selectCellHeight(cell_samples[index]);
+      const auto cell = selectGroundCellHeight(cell_samples[index]);
       if (!std::isfinite(cell.height)) {
+        obstacle_candidates[index] = selectObstacleCellHeight(cell_samples[index]);
         continue;
       }
       grid.height[index] = cell.height;
       support_counts[index] = cell.support_count;
+      obstacle_candidates[index] = selectObstacleCellHeight(cell_samples[index]);
       ++local_observed_cells;
     }
 
@@ -1260,6 +1272,8 @@ private:
         fillInitialMissingFromFloorSeed(grid, startup_floor_seed_samples);
     }
     fillRemainingCells(grid);
+    updateLatestGroundGrid(grid);
+    overlayObstacleCandidates(grid, obstacle_candidates);
     return true;
   }
 
@@ -1419,32 +1433,10 @@ private:
       return {};
     }
 
-    if (min_z_obstacle_override_enabled_) {
-      for (auto candidate = samples.end(); candidate != samples.begin();) {
-        --candidate;
-        const float support_limit = *candidate - static_cast<float>(min_z_obstacle_support_band_);
-        const auto support_begin = std::lower_bound(samples.begin(), std::next(candidate), support_limit);
-        const int support_count = static_cast<int>(std::distance(support_begin, std::next(candidate)));
-        if (support_count < min_z_obstacle_min_points_) {
-          continue;
-        }
-
-        float sum = 0.0F;
-        for (auto it = support_begin; it != std::next(candidate); ++it) {
-          sum += *it;
-        }
-        const float obstacle_height = sum / static_cast<float>(support_count);
-        if (obstacle_height - floor_cell.height >= static_cast<float>(min_z_obstacle_min_height_)) {
-          return {obstacle_height, support_count};
-        }
-        break;
-      }
-    }
-
     return floor_cell;
   }
 
-  CellHeight selectCellHeight(std::vector<float> & samples)
+  CellHeight selectGroundCellHeight(std::vector<float> & samples)
   {
     if (elevation_backend_ == "autonomy_min_z" || elevation_backend_ == "min_z") {
       return minZCellHeight(samples);
@@ -1460,22 +1452,73 @@ private:
     return robustCellHeight(samples);
   }
 
+  CellHeight selectObstacleCellHeight(std::vector<float> samples) const
+  {
+    if (
+      !min_z_obstacle_override_enabled_ ||
+      static_cast<int>(samples.size()) < min_z_obstacle_min_points_)
+    {
+      return {};
+    }
+
+    std::sort(samples.begin(), samples.end());
+    // Search down from the highest return for a supported top-surface cluster.
+    // This is deliberately independent of min_points_per_cell: that parameter
+    // governs smooth terrain confidence, while obstacles may be sparse.
+    for (auto candidate = samples.end(); candidate != samples.begin();) {
+      --candidate;
+      const float support_limit = *candidate - static_cast<float>(min_z_obstacle_support_band_);
+      const auto support_begin = std::lower_bound(samples.begin(), std::next(candidate), support_limit);
+      const int support_count = static_cast<int>(std::distance(support_begin, std::next(candidate)));
+      if (support_count < min_z_obstacle_min_points_) {
+        continue;
+      }
+
+      float sum = 0.0F;
+      for (auto it = support_begin; it != std::next(candidate); ++it) {
+        sum += *it;
+      }
+      return {sum / static_cast<float>(support_count), support_count};
+    }
+    return {};
+  }
+
+  void overlayObstacleCandidates(
+    ElevationGrid & ground_grid,
+    const std::vector<CellHeight> & obstacle_candidates) const
+  {
+    const std::size_t count = std::min(ground_grid.height.size(), obstacle_candidates.size());
+    for (std::size_t index = 0; index < count; ++index) {
+      const auto & obstacle = obstacle_candidates[index];
+      const float ground = ground_grid.height[index];
+      if (
+        std::isfinite(obstacle.height) &&
+        std::isfinite(ground) &&
+        obstacle.height - ground >= static_cast<float>(min_z_obstacle_min_height_))
+      {
+        ground_grid.height[index] = obstacle.height;
+      }
+    }
+  }
+
   void mergeWithPreviousGrid(ElevationGrid & grid, const std::vector<int> & support_counts)
   {
     std::lock_guard<std::mutex> lock(grid_mutex_);
-    if (!has_grid_ || latest_grid_.height.size() != grid.height.size()) {
+    if (!has_ground_grid_ || latest_ground_grid_.height.size() != grid.height.size()) {
       return;
     }
 
     for (std::size_t i = 0; i < grid.height.size(); ++i) {
-      const float previous = latest_grid_.height[i];
+      const float previous = latest_ground_grid_.height[i];
       if (!std::isfinite(previous)) {
         continue;
       }
 
       float & current = grid.height[i];
       if (!std::isfinite(current)) {
-        current = previous;
+        if (fill_missing_from_previous_grid_) {
+          current = previous;
+        }
         continue;
       }
 
@@ -1513,15 +1556,6 @@ private:
         if (!std::isfinite(value)) {
           continue;
         }
-        if (
-          min_z_obstacle_override_enabled_ &&
-          value >= static_cast<float>(min_z_obstacle_min_height_) &&
-          index < support_counts.size() &&
-          support_counts[index] >= min_z_obstacle_min_points_)
-        {
-          continue;
-        }
-
         std::vector<float> neighbors;
         int support = 0;
         collectNeighbors(grid, row, col, isolated_filter_radius_, neighbors);
@@ -1874,6 +1908,8 @@ private:
 
           float sum = 0.0F;
           int count = 0;
+          float min_neighbor = std::numeric_limits<float>::infinity();
+          float max_neighbor = -std::numeric_limits<float>::infinity();
           for (int dy = -1; dy <= 1; ++dy) {
             const int nr = row + dy;
             if (nr < 0 || nr >= height) {
@@ -1892,11 +1928,20 @@ private:
               if (std::isfinite(value)) {
                 sum += value;
                 ++count;
+                min_neighbor = std::min(min_neighbor, value);
+                max_neighbor = std::max(max_neighbor, value);
               }
             }
           }
 
           if (count >= interpolation_min_neighbors_) {
+            if (
+              std::isfinite(interpolation_max_height_diff_) &&
+              interpolation_max_height_diff_ >= 0.0 &&
+              (max_neighbor - min_neighbor) > static_cast<float>(interpolation_max_height_diff_))
+            {
+              continue;
+            }
             next[index] = sum / static_cast<float>(count);
             changed = true;
           }
@@ -2132,6 +2177,13 @@ private:
     }
   }
 
+  void updateLatestGroundGrid(const ElevationGrid & grid)
+  {
+    std::lock_guard<std::mutex> lock(grid_mutex_);
+    latest_ground_grid_ = grid;
+    has_ground_grid_ = true;
+  }
+
   void onPointLioOdom(nav_msgs::msg::Odometry::SharedPtr msg)
   {
     {
@@ -2159,7 +2211,9 @@ private:
       {
         std::lock_guard<std::mutex> lock(grid_mutex_);
         latest_grid_ = grid;
+        latest_ground_grid_ = grid;
         has_grid_ = true;
+        has_ground_grid_ = true;
       }
       height_map_pub_->publish(gridToPointCloud(grid));
       height_map_msg_pub_->publish(manualHeightMapMsg(grid));
@@ -2364,6 +2418,7 @@ private:
   double height_map_manual_value_{0.48};
   int interpolation_max_passes_{8};
   int interpolation_min_neighbors_{1};
+  double interpolation_max_height_diff_{0.03};
   double fill_remaining_height_{0.0};
   bool initial_floor_seed_fill_enabled_{true};
   bool initial_floor_seed_fill_applied_{false};
@@ -2394,9 +2449,10 @@ private:
   double intra_cell_min_support_gap_{0.025};
   int intra_cell_min_support_count_{3};
   double edge_mix_height_diff_{0.035};
-  int edge_prefer_prev_support_count_{2};
+  int edge_prefer_prev_support_count_{0};
+  bool fill_missing_from_previous_grid_{false};
   double cell_height_percentile_{0.20};
-  double temporal_alpha_{0.65};
+  double temporal_alpha_{1.0};
   int isolated_filter_radius_{1};
   int isolated_filter_min_support_neighbors_{2};
   double isolated_filter_support_height_diff_{0.025};
@@ -2430,6 +2486,8 @@ private:
   std::mutex grid_mutex_;
   ElevationGrid latest_grid_;
   bool has_grid_{false};
+  ElevationGrid latest_ground_grid_;
+  bool has_ground_grid_{false};
   std::mutex odom_mutex_;
   nav_msgs::msg::Odometry latest_odom_;
   bool has_odom_{false};
