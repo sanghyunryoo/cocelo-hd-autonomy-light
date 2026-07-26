@@ -1,18 +1,18 @@
 autonomy_light:
   ros__parameters:
     # Frames and LiDAR poses.
-    target_frame: "base_link"
+    target_frame: "hd/base"
     height_map_frame: "base_link_gravity"
     lidar_frame: "lidar_link"
     lidar2_frame: "lidar2_link"
 
     # LiDAR 1 pose in target_frame. Used directly in the single-LiDAR path.
-    target_to_lidar_xyz: [0.038335, 0.00162081, 0.138986]
-    target_to_lidar_rpy: [3.1416, 0.0, 0.0]
+    target_to_lidar_xyz: [0.234, 0.0, 0.077]
+    target_to_lidar_rpy: [0.0, 0.785398, 0.0]
 
     # LiDAR 2 pose in target_frame. Used only when raw_lidar2_topic is set.
-    target_to_lidar2_xyz: [0.038335, 0.00162081, 0.138986]
-    target_to_lidar2_rpy: [3.1416, 0.0, 0.0]
+    target_to_lidar2_xyz: [-0.213, 0.0, 0.077]
+    target_to_lidar2_rpy: [0.0, 0.785398, 3.141593]
 
     # User-facing setup: robot-centric elevation map geometry.
     elevation_resolution: 0.01
@@ -35,7 +35,7 @@ autonomy_light:
     # Offline mapping mode. Normally leave these false/default and use
     # ./mapping.sh, which overrides them at runtime.
     mapping_only: false
-    # Set only by mapping.sh. In mapping-only mode this enables the refined
+    # Set only by mapping.sh. In mapping-only mode this enables the
     # global-map accumulator and writes that precision map on shutdown.
     mapping_refined_pcd_file: ""
     # Offline full-SLAM refinement used by mapping.sh. Point-LIO supplies the
@@ -129,8 +129,8 @@ autonomy_light:
     # ROS 2 domain split: keep heavy perception internal, publish only control-facing
     # outputs on the external domain. point_lio_global_map.ros_domain_id below
     # independently selects the RViz/debug domain for the refined global map.
-    internal_ros_domain_id: 0
-    external_ros_domain_id: 0
+    internal_ros_domain_id: 34
+    external_ros_domain_id: 34
     
     # Livox driver setup.
     livox_model: "mid360"
@@ -159,7 +159,7 @@ autonomy_light:
     raw_lidar2_topic: ""
     raw_lidar_msg_type: "livox_custom"
     raw_imu_topic: "livox/imu"
-    raw_imu2_topic: "/livox2/imu"
+    raw_imu2_topic: ""
     monitor_raw_lidar: false
 
     # Two-LiDAR merge output. Enabled only when raw_lidar2_topic is non-empty.
@@ -183,7 +183,7 @@ autonomy_light:
       refined_topic: "/point_lio/global_map_refined"
       # Change this ID to view only the global map from a separate RViz domain.
       # For example: ROS_DOMAIN_ID=17 rviz2
-      ros_domain_id: 0
+      ros_domain_id: 34
       use_for_height_map: true
       height_voxel_leaf_size: 0.01
       height_max_points: 4000000

@@ -70,6 +70,10 @@
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include "autonomy_light/transform_publisher.hpp"
+#include "autonomy_light/transform_math.hpp"
+#include "autonomy_light/lidar_merger.hpp"
+
 namespace autonomy_light
 {
 namespace
@@ -215,21 +219,6 @@ struct SparseVoxelAccumulator
 using SparseVoxelMap =
   std::unordered_map<SparseVoxelKey, SparseVoxelAccumulator, SparseVoxelKeyHash>;
 
-struct TimedPoint
-{
-  float x{0.0F};
-  float y{0.0F};
-  float z{0.0F};
-  float intensity{0.0F};
-  double time_offset{0.0};
-};
-
-struct TimedCloud
-{
-  rclcpp::Time stamp{0, 0u, RCL_SYSTEM_TIME};
-  std::vector<TimedPoint> points;
-};
-
 struct CellHeight
 {
   float height{std::numeric_limits<float>::quiet_NaN()};
@@ -288,56 +277,6 @@ std::string matrixParam(const tf2::Matrix3x3 & matrix)
     }
   }
   return vectorParam(values);
-}
-
-const sensor_msgs::msg::PointField * findPointField(
-  const sensor_msgs::msg::PointCloud2 & cloud,
-  const std::string & name)
-{
-  const auto it = std::find_if(
-    cloud.fields.begin(),
-    cloud.fields.end(),
-    [&name](const sensor_msgs::msg::PointField & field) { return field.name == name; });
-  return it == cloud.fields.end() ? nullptr : &(*it);
-}
-
-template<typename T>
-T readPointFieldAs(const std::uint8_t * ptr)
-{
-  T value{};
-  std::memcpy(&value, ptr, sizeof(T));
-  return value;
-}
-
-double readPointFieldNumeric(
-  const std::uint8_t * base,
-  const sensor_msgs::msg::PointField * field,
-  const double fallback = 0.0)
-{
-  if (field == nullptr) {
-    return fallback;
-  }
-  const auto * ptr = base + field->offset;
-  switch (field->datatype) {
-    case sensor_msgs::msg::PointField::INT8:
-      return static_cast<double>(readPointFieldAs<std::int8_t>(ptr));
-    case sensor_msgs::msg::PointField::UINT8:
-      return static_cast<double>(readPointFieldAs<std::uint8_t>(ptr));
-    case sensor_msgs::msg::PointField::INT16:
-      return static_cast<double>(readPointFieldAs<std::int16_t>(ptr));
-    case sensor_msgs::msg::PointField::UINT16:
-      return static_cast<double>(readPointFieldAs<std::uint16_t>(ptr));
-    case sensor_msgs::msg::PointField::INT32:
-      return static_cast<double>(readPointFieldAs<std::int32_t>(ptr));
-    case sensor_msgs::msg::PointField::UINT32:
-      return static_cast<double>(readPointFieldAs<std::uint32_t>(ptr));
-    case sensor_msgs::msg::PointField::FLOAT32:
-      return static_cast<double>(readPointFieldAs<float>(ptr));
-    case sensor_msgs::msg::PointField::FLOAT64:
-      return readPointFieldAs<double>(ptr);
-    default:
-      return fallback;
-  }
 }
 
 std::vector<double> parseYamlVector(
@@ -563,8 +502,7 @@ public:
     height_map_msg_pub_.reset();
     odom_pub_.reset();
     path_pub_.reset();
-    output_static_tf_broadcaster_.reset();
-    output_tf_broadcaster_.reset();
+    transform_publisher_.reset();
     height_builder_node_.reset();
     height_publisher_node_.reset();
     global_map_node_.reset();
@@ -2071,10 +2009,9 @@ private:
         rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
       publishSavedMap();
     }
-    output_static_tf_broadcaster_ =
-      std::make_shared<tf2_ros::StaticTransformBroadcaster>(output_node);
-    output_tf_broadcaster_ =
-      std::make_shared<tf2_ros::TransformBroadcaster>(output_node);
+    transform_publisher_ = std::make_unique<TransformPublisher>(
+      output_node,
+      TransformFrames{target_frame_, height_map_frame_, saved_map_frame_, odom_frame_});
 
     const auto height_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>(1.0 / publish_rate_hz_));
@@ -2128,6 +2065,18 @@ private:
     heartbeat_pub_ = create_publisher<std_msgs::msg::String>(heartbeat_topic_, 10);
 
     if (lidarMergeEnabled()) {
+      lidar_merger_ = std::make_unique<LidarMerger>(
+        LidarMergeConfig{
+          target_frame_,
+          target_to_lidar_translation_,
+          target_to_lidar_rotation_,
+          target_to_lidar2_translation_,
+          target_to_lidar2_rotation_,
+          lidar_merge_sync_tolerance_,
+          lidar_merge_max_queue_size_,
+          lidar_merge_publish_lidar1_on_sync_miss_},
+        get_logger(),
+        get_clock());
       merged_lidar_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
         merged_lidar_topic_,
         rclcpp::SensorDataQoS());
@@ -2215,328 +2164,64 @@ private:
       });
   }
 
-  TimedPoint transformLidarPoint(
-    const int lidar_index,
-    const float x,
-    const float y,
-    const float z,
-    const float intensity,
-    const double time_offset) const
-  {
-    const auto & rotation = lidar_index == 0 ? target_to_lidar_rotation_ : target_to_lidar2_rotation_;
-    const auto & translation =
-      lidar_index == 0 ? target_to_lidar_translation_ : target_to_lidar2_translation_;
-    const tf2::Vector3 p_target = translation + rotation * tf2::Vector3(x, y, z);
-    return {
-      static_cast<float>(p_target.x()),
-      static_cast<float>(p_target.y()),
-      static_cast<float>(p_target.z()),
-      intensity,
-      time_offset};
-  }
-
   void onMergeCustomCloud(
     const int lidar_index,
     livox_ros_driver2::msg::CustomMsg::SharedPtr msg)
   {
-    TimedCloud cloud;
-    cloud.stamp = rclcpp::Time(msg->header.stamp);
-    cloud.points.reserve(msg->points.size());
-    for (const auto & point : msg->points) {
-      if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
-        continue;
-      }
-      cloud.points.push_back(transformLidarPoint(
-        lidar_index,
-        point.x,
-        point.y,
-        point.z,
-        static_cast<float>(point.reflectivity),
-        static_cast<double>(point.offset_time) * 1.0e-9));
+    if (!lidar_merger_) {
+      return;
     }
-    pushMergeCloud(lidar_index, std::move(cloud));
+    bool accepted_input = false;
+    auto merged_clouds = lidar_merger_->ingestCustom(lidar_index, *msg, &accepted_input);
+    publishMergedClouds(lidar_index, accepted_input, std::move(merged_clouds));
   }
 
   void onMergePointCloud(
     const int lidar_index,
     sensor_msgs::msg::PointCloud2::SharedPtr msg)
   {
-    const auto * x_field = findPointField(*msg, "x");
-    const auto * y_field = findPointField(*msg, "y");
-    const auto * z_field = findPointField(*msg, "z");
-    if (x_field == nullptr || y_field == nullptr || z_field == nullptr || msg->point_step == 0) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(),
-        *get_clock(),
-        2000,
-        "LiDAR merge input cloud missing xyz fields");
+    if (!lidar_merger_) {
       return;
     }
-    auto * intensity_field = findPointField(*msg, "intensity");
-    if (intensity_field == nullptr) {
-      intensity_field = findPointField(*msg, "reflectivity");
-    }
-    const auto * time_field = findPointField(*msg, "timestamp");
-    if (time_field == nullptr) {
-      time_field = findPointField(*msg, "time");
-    }
-    if (time_field == nullptr) {
-      time_field = findPointField(*msg, "t");
-    }
-    if (time_field == nullptr) {
-      time_field = findPointField(*msg, "offset_time");
-    }
-
-    TimedCloud cloud;
-    cloud.stamp = rclcpp::Time(msg->header.stamp);
-    const auto point_count = static_cast<std::size_t>(msg->width) * msg->height;
-    if (point_count == 0) {
-      return;
-    }
-    cloud.points.reserve(point_count);
-    const auto * data = msg->data.data();
-    const double first_time = time_field != nullptr ?
-      readPointFieldNumeric(data, time_field, 0.0) :
-      0.0;
-
-    for (std::size_t i = 0; i < point_count; ++i) {
-      const auto * base = data + i * msg->point_step;
-      const auto x = static_cast<float>(readPointFieldNumeric(base, x_field));
-      const auto y = static_cast<float>(readPointFieldNumeric(base, y_field));
-      const auto z = static_cast<float>(readPointFieldNumeric(base, z_field));
-      if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
-        continue;
-      }
-      const auto intensity = static_cast<float>(readPointFieldNumeric(base, intensity_field, 0.0));
-      double time_offset = 0.0;
-      if (time_field != nullptr) {
-        time_offset = readPointFieldNumeric(base, time_field, first_time) - first_time;
-        if (std::abs(time_offset) > 1.0) {
-          time_offset *= 1.0e-9;
-        }
-      }
-      cloud.points.push_back(transformLidarPoint(lidar_index, x, y, z, intensity, time_offset));
-    }
-    pushMergeCloud(lidar_index, std::move(cloud));
+    bool accepted_input = false;
+    auto merged_clouds = lidar_merger_->ingestPointCloud(lidar_index, *msg, &accepted_input);
+    publishMergedClouds(lidar_index, accepted_input, std::move(merged_clouds));
   }
 
-  void pushMergeCloud(const int lidar_index, TimedCloud cloud)
+  void publishMergedClouds(
+    const int lidar_index,
+    const bool accepted_input,
+    std::vector<sensor_msgs::msg::PointCloud2> merged_clouds)
   {
-    if (cloud.points.empty()) {
-      return;
-    }
-    if (monitor_raw_lidar_ && lidar_index == 0) {
+    if (accepted_input && monitor_raw_lidar_ && lidar_index == 0) {
       last_lidar_time_ = now();
       ++lidar_count_;
     }
-
-    {
-      std::lock_guard<std::mutex> lock(lidar_merge_mutex_);
-      auto & queue = lidar_index == 0 ? lidar1_queue_ : lidar2_queue_;
-      queue.push_back(std::move(cloud));
-      while (static_cast<int>(queue.size()) > lidar_merge_max_queue_size_) {
-        queue.pop_front();
-      }
-      tryPublishMergedLidarLocked();
-    }
-  }
-
-  static double stampSeconds(const rclcpp::Time & stamp)
-  {
-    return static_cast<double>(stamp.nanoseconds()) * 1.0e-9;
-  }
-
-  void tryPublishMergedLidarLocked()
-  {
     if (!merged_lidar_pub_) {
       return;
     }
-    while (!lidar1_queue_.empty()) {
-      if (lidar2_queue_.empty()) {
-        return;
-      }
-
-      const auto & lidar1 = lidar1_queue_.front();
-      const double lidar1_stamp = stampSeconds(lidar1.stamp);
-      auto best_it = lidar2_queue_.begin();
-      double best_diff = std::abs(stampSeconds(best_it->stamp) - lidar1_stamp);
-      for (auto it = std::next(lidar2_queue_.begin()); it != lidar2_queue_.end(); ++it) {
-        const double diff = std::abs(stampSeconds(it->stamp) - lidar1_stamp);
-        if (diff < best_diff) {
-          best_diff = diff;
-          best_it = it;
-        }
-      }
-
-      if (best_diff <= lidar_merge_sync_tolerance_) {
-        publishMergedLidar(lidar1, &(*best_it));
-        lidar2_queue_.erase(lidar2_queue_.begin(), std::next(best_it));
-        lidar1_queue_.pop_front();
-        continue;
-      }
-
-      const double newest_lidar2_stamp = stampSeconds(lidar2_queue_.back().stamp);
-      if (newest_lidar2_stamp + lidar_merge_sync_tolerance_ < lidar1_stamp) {
-        lidar2_queue_.pop_front();
-        continue;
-      }
-      if (lidar1_stamp + lidar_merge_sync_tolerance_ < newest_lidar2_stamp) {
-        RCLCPP_WARN_THROTTLE(
-          get_logger(),
-          *get_clock(),
-          1000,
-          "LiDAR merge sync miss: nearest dt=%.4fs tolerance=%.4fs",
-          best_diff,
-          lidar_merge_sync_tolerance_);
-        if (lidar_merge_publish_lidar1_on_sync_miss_) {
-          publishMergedLidar(lidar1, nullptr);
-        }
-        lidar1_queue_.pop_front();
-        continue;
-      }
-      return;
+    for (auto & cloud : merged_clouds) {
+      merged_lidar_pub_->publish(cloud);
     }
-  }
-
-  void publishMergedLidar(const TimedCloud & lidar1, const TimedCloud * lidar2) const
-  {
-    const std::size_t lidar2_size = lidar2 == nullptr ? 0 : lidar2->points.size();
-    sensor_msgs::msg::PointCloud2 cloud;
-    cloud.header.stamp = lidar1.stamp;
-    cloud.header.frame_id = target_frame_;
-    cloud.height = 1;
-    cloud.is_bigendian = false;
-    cloud.is_dense = true;
-
-    sensor_msgs::PointCloud2Modifier modifier(cloud);
-    modifier.setPointCloud2Fields(
-      5,
-      "x", 1, sensor_msgs::msg::PointField::FLOAT32,
-      "y", 1, sensor_msgs::msg::PointField::FLOAT32,
-      "z", 1, sensor_msgs::msg::PointField::FLOAT32,
-      "intensity", 1, sensor_msgs::msg::PointField::FLOAT32,
-      "time", 1, sensor_msgs::msg::PointField::FLOAT32);
-    modifier.resize(lidar1.points.size() + lidar2_size);
-
-    sensor_msgs::PointCloud2Iterator<float> x_it(cloud, "x");
-    sensor_msgs::PointCloud2Iterator<float> y_it(cloud, "y");
-    sensor_msgs::PointCloud2Iterator<float> z_it(cloud, "z");
-    sensor_msgs::PointCloud2Iterator<float> intensity_it(cloud, "intensity");
-    sensor_msgs::PointCloud2Iterator<float> time_it(cloud, "time");
-
-    const double base_stamp = stampSeconds(lidar1.stamp);
-    auto write_point = [&](const TimedCloud & source, const TimedPoint & point) {
-      *x_it = point.x;
-      *y_it = point.y;
-      *z_it = point.z;
-      *intensity_it = point.intensity;
-      const double source_delta = stampSeconds(source.stamp) - base_stamp;
-      *time_it = static_cast<float>(std::max(0.0, source_delta + point.time_offset) * 1.0e9);
-      ++x_it;
-      ++y_it;
-      ++z_it;
-      ++intensity_it;
-      ++time_it;
-    };
-
-    for (const auto & point : lidar1.points) {
-      write_point(lidar1, point);
-    }
-    if (lidar2 != nullptr) {
-      for (const auto & point : lidar2->points) {
-        write_point(*lidar2, point);
-      }
-    }
-    merged_lidar_pub_->publish(cloud);
   }
 
   void publishStaticTransform()
   {
-    publishLidarStaticTransform(lidar_frame_, target_to_lidar_translation_, target_to_lidar_quaternion_);
-    if (lidarMergeEnabled() && !lidar2_frame_.empty()) {
-      publishLidarStaticTransform(
-        lidar2_frame_, target_to_lidar2_translation_, target_to_lidar2_quaternion_);
-    }
-  }
-
-  void publishLidarStaticTransform(
-    const std::string & child_frame,
-    const tf2::Vector3 & translation,
-    const tf2::Quaternion & rotation)
-  {
-    if (child_frame.empty()) {
+    if (!transform_publisher_) {
       return;
     }
-    geometry_msgs::msg::TransformStamped msg;
-    msg.header.stamp = now();
-    msg.header.frame_id = target_frame_;
-    msg.child_frame_id = child_frame;
-    msg.transform.translation.x = translation.x();
-    msg.transform.translation.y = translation.y();
-    msg.transform.translation.z = translation.z();
-    msg.transform.rotation = tf2::toMsg(rotation);
-    if (output_static_tf_broadcaster_) {
-      output_static_tf_broadcaster_->sendTransform(msg);
+    transform_publisher_->publishStaticLidar(
+      lidar_frame_, target_to_lidar_translation_, target_to_lidar_quaternion_, now());
+    if (lidarMergeEnabled() && !lidar2_frame_.empty()) {
+      transform_publisher_->publishStaticLidar(
+        lidar2_frame_, target_to_lidar2_translation_, target_to_lidar2_quaternion_, now());
     }
-  }
-
-  tf2::Quaternion yawOnlyQuaternion(const geometry_msgs::msg::Quaternion & orientation) const
-  {
-    tf2::Quaternion q;
-    tf2::fromMsg(orientation, q);
-    q.normalize();
-
-    double roll = 0.0;
-    double pitch = 0.0;
-    double yaw = 0.0;
-    tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-
-    tf2::Quaternion q_yaw;
-    q_yaw.setRPY(0.0, 0.0, yaw);
-    q_yaw.normalize();
-    return q_yaw;
   }
 
   void publishHeightMapFrameTransform(const nav_msgs::msg::Odometry & odom)
   {
-    // Keep a single external TF tree: map/odom -> target(base_link) ->
-    // base_link_gravity.  Publishing gravity directly from odom creates a
-    // separate branch that can look localized while base_link's other children
-    // remain in a different tree.
-    if (height_map_frame_.empty() || target_frame_.empty() || height_map_frame_ == target_frame_) {
-      return;
-    }
-
-    tf2::Quaternion q_map_target;
-    tf2::fromMsg(odom.pose.pose.orientation, q_map_target);
-    q_map_target.normalize();
-    const tf2::Quaternion q_map_height = yawOnlyQuaternion(odom.pose.pose.orientation);
-    const tf2::Vector3 p_map_target(
-      odom.pose.pose.position.x,
-      odom.pose.pose.position.y,
-      odom.pose.pose.position.z);
-    const tf2::Vector3 p_map_height(
-      odom.pose.pose.position.x,
-      odom.pose.pose.position.y,
-      latest_height_origin_z_);
-    tf2::Quaternion q_target_height = q_map_target.inverse() * q_map_height;
-    q_target_height.normalize();
-    const tf2::Vector3 p_target_height = tf2::quatRotate(
-      q_map_target.inverse(), p_map_height - p_map_target);
-
-    geometry_msgs::msg::TransformStamped msg;
-    msg.header.stamp = odom.header.stamp;
-    if (msg.header.stamp.sec == 0 && msg.header.stamp.nanosec == 0) {
-      msg.header.stamp = now();
-    }
-    msg.header.frame_id = target_frame_;
-    msg.child_frame_id = height_map_frame_;
-    msg.transform.translation.x = p_target_height.x();
-    msg.transform.translation.y = p_target_height.y();
-    msg.transform.translation.z = p_target_height.z();
-    msg.transform.rotation = tf2::toMsg(q_target_height);
-    if (output_tf_broadcaster_) {
-      output_tf_broadcaster_->sendTransform(msg);
+    if (transform_publisher_) {
+      transform_publisher_->publishHeightMapFrame(odom, latest_height_origin_z_, now());
     }
   }
 
@@ -2549,25 +2234,9 @@ private:
       map_from_odom = saved_map_from_odom_;
       localized = saved_map_relocalized_;
     }
-    if (!localized || saved_map_frame_.empty() || odom_frame_.empty() ||
-      saved_map_frame_ == odom_frame_ || !output_tf_broadcaster_)
-    {
-      return;
+    if (transform_publisher_) {
+      transform_publisher_->publishMapToOdom(map_from_odom, localized, now());
     }
-    Eigen::Quaternionf rotation(map_from_odom.block<3, 3>(0, 0));
-    rotation.normalize();
-    geometry_msgs::msg::TransformStamped msg;
-    msg.header.stamp = now();
-    msg.header.frame_id = saved_map_frame_;
-    msg.child_frame_id = odom_frame_;
-    msg.transform.translation.x = map_from_odom(0, 3);
-    msg.transform.translation.y = map_from_odom(1, 3);
-    msg.transform.translation.z = map_from_odom(2, 3);
-    msg.transform.rotation.x = rotation.x();
-    msg.transform.rotation.y = rotation.y();
-    msg.transform.rotation.z = rotation.z();
-    msg.transform.rotation.w = rotation.w();
-    output_tf_broadcaster_->sendTransform(msg);
   }
 
   void startExternalProcesses()
@@ -2676,8 +2345,9 @@ private:
       body_to_lidar_t[1],
       body_to_lidar_t[2]);
 
-    // Point-LIO odometry is already expressed in its body axes. target_to_lidar_rpy
-    // only describes the raw LiDAR TF, so odom child correction must not rotate it.
+    // Point-LIO has already gravity-aligned its body axes. target_to_lidar_rpy
+    // describes the static raw-LiDAR TF and must not be applied again to the
+    // odometry child frame.
     RigidTransform target_to_body;
     target_to_body.translation = target_to_lidar_translation_ - body_p_lidar;
     return target_to_body;
@@ -5347,9 +5017,6 @@ private:
   std::string point_lio_config_file_;
 
   std::mutex map_mutex_;
-  std::mutex lidar_merge_mutex_;
-  std::deque<TimedCloud> lidar1_queue_;
-  std::deque<TimedCloud> lidar2_queue_;
   std::shared_ptr<const std::vector<MapPoint>> saved_map_points_;
   PclCloud::Ptr saved_map_height_cloud_;
   pcl::search::KdTree<pcl::PointXYZ>::Ptr saved_map_height_tree_;
@@ -5451,8 +5118,8 @@ private:
   std::thread height_publisher_spin_thread_;
   std::thread global_map_spin_thread_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr merged_lidar_pub_;
-  std::shared_ptr<tf2_ros::StaticTransformBroadcaster> output_static_tf_broadcaster_;
-  std::shared_ptr<tf2_ros::TransformBroadcaster> output_tf_broadcaster_;
+  std::unique_ptr<LidarMerger> lidar_merger_;
+  std::unique_ptr<TransformPublisher> transform_publisher_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar1_cloud_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar2_cloud_sub_;
