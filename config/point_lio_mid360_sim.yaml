@@ -1,0 +1,81 @@
+/**:
+  ros__parameters:
+    # Isaac bridge publishes /livox/lidar as sensor_msgs/PointCloud2.
+    common:
+      lid_topic: "/livox/lidar"
+      imu_topic: "/livox/imu"
+      lidar_msg_type: "pointcloud2"
+      max_lidar_buffer_size: 2
+
+    preprocess:
+      lidar_type: 1
+      scan_line: 4
+      scan_rate: 10
+      timestamp_unit: 3
+      blind: 0.5
+
+    mapping:
+      imu_en: true
+      extrinsic_est_en: false
+      # LiDAR and IMU use the physically tilted sensor frame. The bridge settles
+      # before publishing, so use those stationary samples to initialize gravity.
+      start_in_aggressive_motion: false
+      acc_norm: 1.0
+      lidar_meas_cov: 0.01
+      acc_cov_output: 500.0
+      gyr_cov_output: 1000.0
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      imu_meas_acc_cov: 0.01
+      imu_meas_omg_cov: 0.01
+      gyr_cov_input: 0.01
+      acc_cov_input: 0.1
+      plane_thr: 0.1
+      match_s: 81.0
+      fov_degree: 360.0
+      det_range: 100.0
+      gravity_align: true
+      gravity: [0.0, 0.0, -9.81]
+      gravity_init: [0.0, 0.0, -9.81]
+      extrinsic_T: [0.0, 0.0, 0.0]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0]
+      # The bridge emits a dense raycast cloud. Keep Point-LIO real-time in
+      # simulation without changing the production MID360 profile.
+      map_update_floor_gate:
+        enabled: false
+
+    odom_header_frame_id: "odom"
+    # Point-LIO's state is the IMU body pose.  Publish the robot body pose
+    # instead: T_odom_base = T_odom_imu * inverse(T_base_imu).
+    # The simulator publishes a co-located, aligned LiDAR/IMU, so here
+    # T_base_imu equals elevation_map.base_to_lidar.  Hardware must use its
+    # independently calibrated T_base_imu when LiDAR/IMU extrinsics are not
+    # identity.
+    odom_child_frame_id: "base_link"
+    odom:
+      child_to_body_T: [0.234064, 0.0, 0.077063]
+      child_to_body_R: [0.70710678, 0.0, 0.70710678,
+                        0.0, 1.0, 0.0,
+                        -0.70710678, 0.0, 0.70710678]
+
+    publish:
+      path_en: true
+      scan_publish_en: true
+      scan_bodyframe_pub_en: false
+
+    pcd_save:
+      pcd_save_en: false
+      interval: -1
+
+    use_imu_as_input: true
+    prop_at_freq_of_imu: true
+    check_satu: true
+    init_map_size: 10
+    point_filter_num: 4
+    space_down_sample: true
+    filter_size_surf: 0.10
+    filter_size_map: 0.10
+    cube_side_length: 1000.0
+    runtime_pos_log_enable: false

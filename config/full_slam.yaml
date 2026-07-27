@@ -1,0 +1,43 @@
+full_slam:
+  ros__parameters:
+    odom_topic: /aft_mapped_to_init
+    cloud_topic: /cloud_registered
+    map_frame: map
+    odom_frame: odom
+
+    keyframe:
+      distance: 1.0
+      angle_radians: 0.35
+
+    place_recognition:
+      rings: 20
+      sectors: 60
+      max_radius: 80.0
+
+    loop:
+      period_seconds: 1.0
+      exclude_recent: 30
+      candidate_count: 10
+      max_descriptor_distance: 0.18
+      submap_neighbors: 3
+
+    tf:
+      # Keep the map -> odom edge available between low-rate graph updates.
+      publish_hz: 20.0
+
+    registration:
+      voxel_size: 0.4
+      max_correspondence_distance: 3.0
+      correspondence_randomness: 20
+      max_iterations: 32
+      max_fitness: 0.5
+
+    map:
+      voxel_size: 0.15
+      refined_voxel_size: 0.03
+      raw_pcd_file: maps/point_lio_global_raw.pcd
+      refined_pcd_file: maps/point_lio_global_refined.pcd
+      save_period_seconds: 30.0
+      refinement:
+        mean_k: 16
+        stddev_multiplier: 0.8
